@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -371,6 +371,10 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
             if lev is None:
                 return f"❌ {c.name}: số dư = 0"
             note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev})"
+            st = allin_setting()       # /lev da dat -> dung muc do (tu nang neu khong du ky quy cho size)
+            if st:
+                want = ins["maxlev"] if st[0] == "max" else min(st[1], ins["maxlev"])
+                lev = max(lev, int(want) if want == int(want) else want)
         # Dat don bay SONG SONG voi lenh (khong cho) -> tiet kiem 1 luot di-ve toi Bybit.
         # Neu da biet don bay dang dung thi bo qua luon.
         lev_task = None
@@ -417,7 +421,8 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
         if lev_err:
             note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"]))
-        return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{real:.0f} USDT, x{lev:g}){note}"
+        val = float(qty) * price       # gia tri thuc sau khi lam tron so luong theo buoc cua san
+        return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{val:.1f} USDT, x{lev:g}){note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
 
@@ -649,7 +654,7 @@ async def close_all():
 
 def status_text():
     lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
-             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy all-in: {lev_label()}"]
+             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy: {lev_label()}"]
     tot = 0.0
     for c in clients:
         st = status.get(c.name) or {}
@@ -673,7 +678,7 @@ def status_blocks(title=None, stamp=None):
     run = cfg["running"]
     blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}"),
               r_par(["Chế độ: ", B("Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"),
-                     " · Đòn bẩy all-in: ", B(lev_label())])]
+                     " · Đòn bẩy: ", B(lev_label())])]
     R, tot, has = [], 0.0, False
     for c in clients:
         st = status.get(c.name) or {}
@@ -856,7 +861,7 @@ HELP_ITEMS = [
     ("/stop", "Dừng bot — position đang mở giữ nguyên"),
     ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
-    ("/lev N", "Đặt đòn bẩy cho /allin. Vd: /lev 10 — hoặc /lev max = max của coin"),
+    ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/help", "Hiện danh sách lệnh này"),
@@ -1118,11 +1123,12 @@ async def handle_update(u):
                         ok = False
                 if ok:
                     cfg["allin_lev"] = arg; save_cfg()
-                    log(f"⚙️ Đòn bẩy all-in: {lev_label()} (từ Telegram)")
+                    log(f"⚙️ Đòn bẩy: {lev_label()} (từ Telegram)")
                     reply = (f"⚙️ Đã đặt đòn bẩy all-in: {lev_label()} cho tất cả sub account.\n"
-                             "Áp dụng khi dùng /allin. Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó.")
+                             "Áp dụng cho /buy, /allin và lệnh từ kênh. Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó; "
+                             "size cần đòn bẩy cao hơn thì tool tự nâng lên.")
                 else:
-                    reply = f"Đòn bẩy all-in hiện tại: {lev_label()}\nDùng: /lev 10 (từ 1 đến 200) hoặc /lev max"
+                    reply = f"Đòn bẩy hiện tại: {lev_label()}\nDùng: /lev 10 (từ 1 đến 200) hoặc /lev max"
             elif cmd == "/allin":
                 a = parse_allin(m.get("text") or "")
                 st = allin_setting()
@@ -1420,7 +1426,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
     <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Rich message (bảng biểu)</option><option value="0">Chữ thường</option></select>
-    <label>Đòn bẩy cho /allin (số, hoặc max = max của coin)</label><input id="allin_lev" placeholder="chưa đặt">
+    <label>Đòn bẩy cho mọi lệnh (số, hoặc max = max của coin; trống = tự tính thấp nhất)</label><input id="allin_lev" placeholder="chưa đặt">
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 

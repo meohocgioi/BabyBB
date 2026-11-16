@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -649,23 +649,54 @@ botst = {"ok": False, "err": "", "last": 0, "name": "", "token": ""}
 BOT_MAX_AGE = 120      # bo qua lenh bot cu hon 120s (vd gui luc tool dang tat)
 
 
-async def bot_api(method, **params):
+tg_http = None         # session rieng cho Telegram (giu ket noi san de gui nhanh)
+
+
+async def bot_api(method, _timeout=8, _quiet=False, **params):
+    """Goi Bot API. Timeout ngan de 1 ket noi bi treo khong lam ca bot bi lag."""
     if not cfg["bot_token"]:
         return {}
     url = f"https://api.telegram.org/bot{cfg['bot_token']}/{method}"
     try:
-        async with http.post(url, json=params, timeout=aiohttp.ClientTimeout(total=40)) as r:
+        to = aiohttp.ClientTimeout(total=_timeout, sock_connect=5)
+        async with tg_http.post(url, json=params, timeout=to) as r:
             j = await r.json()
     except Exception as e:
-        j = {"ok": False, "description": f"{type(e).__name__}: {str(e)[:100]}"}
-    if not j.get("ok") and method != "getUpdates":
+        j = {"ok": False, "description": f"{type(e).__name__}: {str(e)[:100]}".rstrip(": ")}
+    if not j.get("ok") and not _quiet:
         log(f"⚠️ Bot Telegram {method} lỗi: {j.get('description')}")
     return j
 
 
+async def _send(chat, text):
+    for attempt in range(1, 5):
+        r = await bot_api("sendMessage", _quiet=True, chat_id=chat, text=text[:4000])
+        if r.get("ok"):
+            if attempt > 1:
+                log(f"Bot đã gửi được tin sau {attempt} lần thử (mạng tới Telegram chập chờn)")
+            return
+        desc = str(r.get("description"))
+        if "Timeout" not in desc and "Connect" not in desc and "Disconnected" not in desc:
+            break                      # loi tu Telegram (khong phai mang) -> thu lai vo ich
+    log(f"⚠️ Bot không gửi được tin trả lời: {desc}")
+
+
+def send(chat, text):
+    """Gui tin o nen: lenh tiep theo khong phai cho tin truoc gui xong."""
+    asyncio.create_task(_send(chat, text))
+
+
 async def notify(text):
     if cfg["bot_token"] and cfg["bot_owner_id"]:
-        await bot_api("sendMessage", chat_id=cfg["bot_owner_id"], text=text[:4000])
+        send(cfg["bot_owner_id"], text)
+
+
+async def tg_keepalive():
+    """Giu san 1 ket noi toi Telegram de tin tra loi khong phai mo ket noi moi."""
+    while True:
+        await asyncio.sleep(20)
+        if cfg["bot_token"] and botst["ok"]:
+            await bot_api("getMe", _timeout=6, _quiet=True)
 
 
 async def bot_loop():
@@ -679,7 +710,7 @@ async def bot_loop():
             p = {"timeout": 25, "allowed_updates": ["message", "channel_post"]}
             if offset:
                 p["offset"] = offset
-            r = await bot_api("getUpdates", **p)
+            r = await bot_api("getUpdates", _timeout=40, _quiet=True, **p)
             if not r.get("ok"):
                 err = str(r.get("description") or "không kết nối được Telegram")
                 if err != botst["err"]:
@@ -688,7 +719,7 @@ async def bot_loop():
                 await asyncio.sleep(3)
                 continue
             if not botst["ok"] or botst["token"] != cfg["bot_token"]:
-                me = await bot_api("getMe")
+                me = await bot_api("getMe", _quiet=True)
                 botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")
                 botst["token"] = cfg["bot_token"]
                 log(f"🤖 Bot Telegram đã kết nối: {botst['name']} — hãy nhắn lệnh cho đúng bot này")
@@ -727,8 +758,7 @@ async def handle_update(u):
                 log(f"Bỏ qua lệnh bot cũ ({age:.0f}s): {(m.get('text') or '')[:40]}")
                 return
             if chat != str(cfg["bot_owner_id"]).strip():
-                await bot_api("sendMessage", chat_id=chat,
-                              text=f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
+                send(chat, f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
                 return
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
@@ -780,7 +810,7 @@ async def handle_update(u):
                     return   # ket qua da duoc gui qua notify()
             else:
                 reply = HELP_TEXT
-            await bot_api("sendMessage", chat_id=chat, text=reply[:4000])
+            send(chat, reply)
 
 
 # ----------------------------------------------------------------------------
@@ -929,11 +959,12 @@ async def guard(req, handler):
 
 
 async def main():
-    global http
+    global http, tg_http
     load_cfg()
     http = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10),
         connector=aiohttp.TCPConnector(limit=50, keepalive_timeout=60))
+    tg_http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=20, keepalive_timeout=90))
     rebuild_clients()
     await sync_time()
     try:
@@ -962,6 +993,7 @@ async def main():
             pass
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
+    asyncio.create_task(tg_keepalive())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()
 

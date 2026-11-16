@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -56,7 +56,10 @@ seen_msgs = deque(maxlen=200)
 def log(msg):
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
     logs.appendleft(line)
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
 
 
 def load_cfg():
@@ -67,7 +70,7 @@ def load_cfg():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
         except Exception as e:
-            log(f"Loi doc config.json: {e}")
+            log(f"Lỗi đọc config.json: {e}")
     if not str(cfg.get("update_url") or "").strip():
         cfg["update_url"] = DEFAULT_UPDATE_URL
 
@@ -107,7 +110,7 @@ def plan_from_command(cmd):
     if cfg["mode"] == "custom":
         return float(cfg["custom_size"]), float(cfg["custom_tp"]), float(cfg["custom_sl"])
     if cmd["size"] is None:
-        return None, "lenh thieu size/tp/sl (che do theo kenh)"
+        return None, "lệnh thiếu size/tp/sl (chế độ theo kênh)"
     return cmd["size"] * float(cfg["size_unit"]), cmd["tp"], cmd["sl"]
 
 
@@ -229,7 +232,7 @@ async def sync_time():
         r = await public_client().req("GET", "/v5/market/time", auth=False)
         time_offset = int(int(r["result"]["timeNano"]) / 1e6) - int(time.time() * 1000)
     except Exception as e:
-        log(f"Khong dong bo duoc gio Bybit: {e}")
+        log(f"Không đồng bộ được giờ Bybit: {e}")
 
 
 def _store_instrument(it):
@@ -289,16 +292,16 @@ async def open_one(c, symbol, notional, tp, sl, price):
             avail = await c.balance()
         lev, real = calc_leverage(notional, avail, ins["maxlev"])
         if lev is None:
-            return f"❌ {c.name}: so du = 0"
-        note = "" if real >= notional - 0.01 else f" (giam size con {real:.0f} USDT vi max don bay x{lev})"
+            return f"❌ {c.name}: số dư = 0"
+        note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev})"
         r = await c.req("POST", "/v5/position/set-leverage",
                         {"category": "linear", "symbol": symbol,
                          "buyLeverage": str(lev), "sellLeverage": str(lev)})
         if r.get("retCode") not in (0, 110043):
-            return f"❌ {c.name}: set don bay x{lev} loi: {r.get('retMsg')}"
+            return f"❌ {c.name}: đặt đòn bẩy x{lev} lỗi: {r.get('retMsg')}"
         qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
         if qty < ins["min"]:
-            return f"❌ {c.name}: size qua nho (min {fmt(ins['min'])})"
+            return f"❌ {c.name}: size quá nhỏ (min {fmt(ins['min'])})"
         order = {"category": "linear", "symbol": symbol, "side": "Buy",
                  "orderType": "Market", "qty": fmt(qty), "positionIdx": 0}
         tpsl = {}
@@ -316,7 +319,7 @@ async def open_one(c, symbol, notional, tp, sl, price):
             # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
             r = await c.req("POST", "/v5/order/create", order)
         if r.get("retCode") != 0:
-            return f"❌ {c.name}: vao lenh loi: {r.get('retMsg')}"
+            return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"]))
         return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{real:.0f} USDT, x{lev}){note}"
     except Exception as e:
@@ -343,29 +346,29 @@ async def fix_tpsl(c, symbol, tp, sl, idx):
             r = await c.req("POST", "/v5/position/trading-stop", body)
             if r.get("retCode") in (0, 34040):
                 return
-            log(f"⚠️ {c.name}: dat TP/SL theo entry loi: {r.get('retMsg')}")
+            log(f"⚠️ {c.name}: đặt TP/SL theo entry lỗi: {r.get('retMsg')}")
             return
         except Exception as e:
             log(f"⚠️ {c.name}: fix TP/SL: {e}")
-    log(f"⚠️ {c.name}: khong thay position {symbol} de dat TP/SL — KIEM TRA TAY!")
+    log(f"⚠️ {c.name}: không thấy position {symbol} để đặt TP/SL — KIỂM TRA TAY!")
 
 
 async def execute_signal(text, source="telegram", t0=None):
     t0 = t0 or time.time()
     cmd = parse_command(text)
     if not cmd:
-        return "Khong phai lenh hop le"
+        return "Không phải lệnh hợp lệ"
     plan = plan_from_command(cmd)
     if plan[0] is None:
-        log(f"Bo qua '{text.strip()}': {plan[1]}")
+        log(f"Bỏ qua '{text.strip()}': {plan[1]}")
         return plan[1]
     notional, tp, sl = plan
     if not clients:
-        log("Co lenh nhung chua cai sub account nao")
-        return "Chua co sub account"
+        log("Có lệnh nhưng chưa cài sub account nào")
+        return "Chưa có sub account"
     symbol = await resolve_symbol(cmd["coin"])
     if not symbol:
-        msg = f"❌ Khong tim thay hop dong {cmd['coin']}USDT tren Bybit"
+        msg = f"❌ Không tìm thấy hợp đồng {cmd['coin']}USDT trên Bybit"
         log(msg); asyncio.create_task(notify(msg))
         return msg
     r = await public_client().req("GET", "/v5/market/tickers",
@@ -373,7 +376,7 @@ async def execute_signal(text, source="telegram", t0=None):
     try:
         price = float(r["result"]["list"][0]["lastPrice"])
     except Exception:
-        msg = f"❌ Khong lay duoc gia {symbol}: {r.get('retMsg')}"
+        msg = f"❌ Không lấy được giá {symbol}: {r.get('retMsg')}"
         log(msg); asyncio.create_task(notify(msg))
         return msg
     res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price) for c in clients))
@@ -396,8 +399,8 @@ async def close_one(c):
                 "orderType": "Market", "qty": p["size"],
                 "reduceOnly": True, "positionIdx": p["idx"]})
             ok = r.get("retCode") == 0
-            out.append(f"{'✅' if ok else '❌'} {c.name}: dong {p['symbol']}"
-                       + ("" if ok else f" loi: {r.get('retMsg')}"))
+            out.append(f"{'✅' if ok else '❌'} {c.name}: đóng {p['symbol']}"
+                       + ("" if ok else f" lỗi: {r.get('retMsg')}"))
     except Exception as e:
         out.append(f"❌ {c.name}: {e}")
     return out
@@ -405,21 +408,21 @@ async def close_one(c):
 
 async def close_all():
     res = await asyncio.gather(*(close_one(c) for c in clients))
-    lines = [l for sub in res for l in sub] or ["Khong co position nao dang mo"]
+    lines = [l for sub in res for l in sub] or ["Không có position nào đang mở"]
     for l in lines:
         log(l)
     return "\n".join(lines)
 
 
 def status_text():
-    lines = [f"Bot: {'🟢 DANG CHAY' if cfg['running'] else '🔴 DANG DUNG'} | "
-             f"{'Theo kenh' if cfg['mode'] == 'follow' else 'Custom'}"]
+    lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
+             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'}"]
     for c in clients:
         st = status.get(c.name) or {}
         if st.get("error"):
             lines.append(f"{c.name}: ⚠️ {st['error']}")
         elif not st.get("positions"):
-            lines.append(f"{c.name}: khong co position")
+            lines.append(f"{c.name}: không có position")
         else:
             for p in st["positions"]:
                 side = "Long" if p["side"] == "Buy" else "Short"
@@ -475,10 +478,10 @@ async def handle_channel_text(msg_id, text, age, source, t0):
         return
     seen_msgs.append(msg_id)
     if age > SIGNAL_MAX_AGE:
-        log(f"Bo qua lenh cu ({age:.0f}s): {text.strip()}")
+        log(f"Bỏ qua lệnh cũ ({age:.0f}s): {text.strip()}")
         return
     if not cfg["running"]:
-        log(f"Bot dang DUNG — bo qua lenh: {text.strip()}")
+        log(f"Bot đang DỪNG — bỏ qua lệnh: {text.strip()}")
         return
     await execute_signal(text, source, t0)
 
@@ -526,17 +529,17 @@ async def web_listen_loop():
                 page = await r.text()
             posts = parse_preview(page)
             if not posts:
-                listen.update(ok=False, err="khong doc duoc kenh (kenh rieng tu, sai ten, hoac tat xem truoc)")
+                listen.update(ok=False, err="không đọc được kênh (kênh riêng tư, sai tên, hoặc tắt xem trước)")
                 continue
             listen.update(ok=True, err="", last=time.time())
             if last_id is None:            # lan dau: chi ghi moc, khong vao lenh cu
                 last_id = posts[-1][0]
-                log(f"Dang nghe kenh cong khai @{uname} (tin moi nhat #{last_id})")
+                log(f"Đang nghe kênh công khai @{uname} (tin mới nhất #{last_id})")
                 continue
             for mid, text, ts in posts:
                 if mid > last_id:
                     last_id = mid
-                    await handle_channel_text(mid, text, time.time() - ts, "kenh", t0)
+                    await handle_channel_text(mid, text, time.time() - ts, "kênh", t0)
         except Exception as e:
             listen.update(ok=False, err=str(e)[:100])
 
@@ -587,9 +590,9 @@ async def bot_loop():
                 if (num and ch.get("id") == num) or (uname and (ch.get("username") or "").lower() == uname):
                     try:
                         await handle_channel_text(cp["message_id"], cp.get("text") or "",
-                                                  time.time() - cp.get("date", time.time()), "kenh-bot", time.time())
+                                                  time.time() - cp.get("date", time.time()), "kênh-bot", time.time())
                     except Exception as e:
-                        log(f"Loi xu ly channel_post: {e}")
+                        log(f"Lỗi xử lý channel_post: {e}")
                 continue
             m = u.get("message") or {}
             chat = str((m.get("chat") or {}).get("id", ""))
@@ -599,21 +602,21 @@ async def bot_loop():
                 continue
             if chat != str(cfg["bot_owner_id"]).strip():
                 await bot_api("sendMessage", chat_id=chat,
-                              text=f"Chat ID cua ban: {chat}\nNhap so nay vao o 'Chat ID chu bot' tren tool.")
+                              text=f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
                 continue
             if cmd == "/start":
-                cfg["running"] = True; save_cfg(); log("▶️ Start (tu Telegram)")
-                reply = "▶️ Bot DA CHAY\n" + status_text()
+                cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
+                reply = "▶️ Bot ĐÃ CHẠY\n" + status_text()
             elif cmd == "/stop":
-                cfg["running"] = False; save_cfg(); log("⏸ Stop (tu Telegram)")
-                reply = "⏸ Bot DA DUNG (cac position dang mo van giu nguyen)"
+                cfg["running"] = False; save_cfg(); log("⏸ Stop (từ Telegram)")
+                reply = "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)"
             elif cmd == "/close":
-                log("🛑 Close all (tu Telegram)")
-                reply = "🛑 Market close tat ca:\n" + await close_all()
+                log("🛑 Close all (từ Telegram)")
+                reply = "🛑 Market close tất cả:\n" + await close_all()
             elif cmd == "/status":
                 reply = status_text()
             else:
-                reply = "/start chay bot\n/stop dung bot\n/close dong tat ca position\n/status xem trang thai"
+                reply = "/start chạy bot\n/stop dừng bot\n/close đóng tất cả position\n/status xem trạng thái"
             await bot_api("sendMessage", chat_id=chat, text=reply[:4000])
 
 
@@ -676,8 +679,8 @@ async def h_save_cfg(req):
         await sync_time()
         await load_instruments()
     except Exception as e:
-        log(f"Tai danh sach hop dong loi: {e}")
-    log("💾 Da luu cai dat")
+        log(f"Tải danh sách hợp đồng lỗi: {e}")
+    log("💾 Đã lưu cài đặt")
     return web.json_response({"ok": True})
 
 
@@ -692,7 +695,7 @@ async def h_stop(req):
 
 
 async def h_close(req):
-    log("🛑 Close all (tu tool)")
+    log("🛑 Close all (từ tool)")
     return web.json_response({"ok": True, "msg": await close_all()})
 
 
@@ -705,19 +708,19 @@ async def h_manual(req):
 async def h_update(req):
     url = cfg["update_url"].strip()
     if not url:
-        return web.json_response({"ok": False, "msg": "Chua nhap link update (GitHub raw) trong Cai dat"})
+        return web.json_response({"ok": False, "msg": "Chưa nhập link update (GitHub raw) trong Cài đặt"})
     try:
         sep = "&" if "?" in url else "?"
         async with http.get(f"{url}{sep}t={int(time.time())}") as r:
             if r.status != 200:
-                return web.json_response({"ok": False, "msg": f"Tai file loi HTTP {r.status}"})
+                return web.json_response({"ok": False, "msg": f"Tải file lỗi HTTP {r.status}"})
             code = await r.text()
         m = re.search(r'^VERSION\s*=\s*"([^"]+)"', code, re.M)
         if not m:
-            return web.json_response({"ok": False, "msg": "File tai ve khong phai tool nay (thieu VERSION)"})
+            return web.json_response({"ok": False, "msg": "File tải về không phải tool này (thiếu VERSION)"})
         compile(code, "bybit_copy.py", "exec")
         if m.group(1) == VERSION:
-            return web.json_response({"ok": True, "msg": f"Dang la ban moi nhat ({VERSION})"})
+            return web.json_response({"ok": True, "msg": f"Đang là bản mới nhất ({VERSION})"})
         me = os.path.abspath(__file__)
         with open(me, "r", encoding="utf-8") as f:
             old = f.read()
@@ -725,12 +728,12 @@ async def h_update(req):
             f.write(old)
         with open(me, "w", encoding="utf-8", newline="\n") as f:
             f.write(code)
-        log(f"⬆️ Update {VERSION} -> {m.group(1)}, dang khoi dong lai...")
+        log(f"⬆️ Update {VERSION} -> {m.group(1)}, đang khởi động lại...")
         asyncio.get_event_loop().call_later(1.0, restart)
         return web.json_response({"ok": True, "restart": True,
-                                  "msg": f"Da update len {m.group(1)} — tool tu khoi dong lai"})
+                                  "msg": f"Đã update lên {m.group(1)} — tool tự khởi động lại"})
     except SyntaxError as e:
-        return web.json_response({"ok": False, "msg": f"Ban moi bi loi code, giu ban cu: {e}"})
+        return web.json_response({"ok": False, "msg": f"Bản mới bị lỗi code, giữ bản cũ: {e}"})
     except Exception as e:
         return web.json_response({"ok": False, "msg": str(e)})
 
@@ -762,9 +765,9 @@ async def main():
     await sync_time()
     try:
         n = await load_instruments()
-        log(f"Da tai {n} hop dong USDT perp ({cfg['env']})")
+        log(f"Đã tải {n} hợp đồng USDT perp ({cfg['env']})")
     except Exception as e:
-        log(f"Tai danh sach hop dong loi: {e}")
+        log(f"Tải danh sách hợp đồng lỗi: {e}")
     for k in ("tg_api_id", "tg_api_hash", "tg_phone", "channel_title"):
         cfg.pop(k, None)
 
@@ -778,7 +781,7 @@ async def main():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", PORT).start()
-    log(f"Tool v{VERSION} dang chay: http://127.0.0.1:{PORT}")
+    log(f"Tool v{VERSION} đang chạy: http://127.0.0.1:{PORT}")
     if not os.environ.get("BYBITCOPY_RESTARTED"):
         try:
             webbrowser.open(f"http://127.0.0.1:{PORT}")
@@ -909,6 +912,10 @@ loadCfg();refresh();setInterval(refresh,2000);
 """
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     if sys.platform == "win32":
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

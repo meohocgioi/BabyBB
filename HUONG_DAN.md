@@ -17,14 +17,10 @@ Dán vào ô Sub account, mỗi dòng một sub theo dạng `apikey=apisecret` (
 > Nên thử trước ở môi trường **Demo Trading** (tạo API key trong chế độ Demo của Bybit) rồi mới chuyển Mainnet.
 
 ## 3. Nghe kênh Telegram
-Hằng ngày chỉ cần ô **Channel ID** (dạng `-1001234567890` hoặc `@tenkenh`) → **Lưu cài đặt**.
+Chỉ cần nhập **Channel ID** → **Lưu cài đặt**. Tool không đăng nhập tài khoản Telegram của bạn.
 
-Vì kênh là của người khác, tool phải đọc kênh bằng tài khoản Telegram của bạn — đăng nhập **một lần duy nhất** trong mục "Đăng nhập Telegram":
-1. Vào https://my.telegram.org → API development tools → tạo app → lấy **API ID** và **API Hash**.
-2. Nhập API ID, API Hash, số điện thoại (+84…) → **Lưu & gửi mã**.
-3. Nhập mã Telegram gửi về (và mật khẩu 2 lớp nếu có) → **Đăng nhập**. Tài khoản này phải đang tham gia kênh.
-
-Không cần đăng nhập nếu chủ kênh thêm bot điều khiển của bạn (mục 4) làm admin kênh — khi đó bot tự nghe lệnh.
+- **Kênh công khai** (có @tenkenh): nhập `@tenkenh`. Tool đọc trang xem trước công khai của kênh, kiểm tra mỗi giây. Có thể trễ vài giây so với lúc tin được đăng.
+- **Kênh riêng tư** (chỉ có ID dạng `-100…`): chỉ nghe được khi chủ kênh thêm bot điều khiển của bạn (mục 4) làm admin kênh. Cách này cũng nhanh hơn cho kênh công khai.
 
 ## 4. Bot điều khiển từ xa
 1. Nhắn @BotFather → `/newbot` → lấy **Bot Token**, dán vào tool → Lưu.
@@ -37,7 +33,7 @@ Bot cũng tự báo về Telegram mỗi khi tool vào lệnh.
 Link update đã gắn sẵn vào repo https://github.com/meohocgioi/BabyBB — không cần dán gì.
 Mỗi khi có bản mới được đẩy lên repo, bấm **Update New Ver** → tool tự tải, kiểm tra và khởi động lại. Cài đặt của bạn giữ nguyên.
 
-API key **không** nằm trong `bybit_copy.py` mà nằm trong `config.json` trên máy bạn — đừng bao giờ upload `config.json` hay `tg_session.session` lên GitHub.
+API key **không** nằm trong `bybit_copy.py` mà nằm trong `config.json` trên máy bạn — đừng bao giờ upload `config.json` lên GitHub.
 
 ## 6. Cách tool vào lệnh
 - Lệnh: `m #coin size tp sl` — ví dụ `m #space 1 10 2` = Long SPACEUSDT, position 1000 USDT, TP +10%, SL −2%.

@@ -4,9 +4,9 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
-import asyncio, hashlib, hmac, json, math, os, re, sys, time, webbrowser
+import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -15,16 +15,8 @@ from urllib.parse import urlencode, urlparse
 import aiohttp
 from aiohttp import web
 
-try:
-    from telethon import TelegramClient, events
-    from telethon import utils as tl_utils
-    from telethon.errors import SessionPasswordNeededError
-except Exception:  # telethon chua cai
-    TelegramClient = None
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-SESSION_PATH = os.path.join(BASE_DIR, "tg_session")
 PORT = 8787
 RESTART_CODE = 42
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/meohocgioi/BabyBB/main/bybit_copy.py"
@@ -45,7 +37,6 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
-    "tg_api_id": "", "tg_api_hash": "", "tg_phone": "",
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
     "update_url": DEFAULT_UPDATE_URL,
@@ -460,9 +451,12 @@ async def status_loop():
 
 
 # ----------------------------------------------------------------------------
-# Telegram: nghe kenh (tai khoan ca nhan qua Telethon)
+# Telegram: nghe kenh — KHONG dang nhap tai khoan
+#   1) Kenh cong khai (@username): doc trang xem truoc t.me/s/<username>
+#   2) Bot cua ban la admin kenh: nhan channel_post qua Bot API (xem bot_loop)
 # ----------------------------------------------------------------------------
-tg = {"client": None, "state": "need_config", "creds": None, "chan_num": None}
+listen = {"mode": "none", "ok": False, "err": "", "last": 0}
+POLL_INTERVAL = 1.0
 
 
 def chan_norm():
@@ -472,22 +466,6 @@ def chan_norm():
     if re.fullmatch(r"-?\d+", s):
         return (int(s) if s.startswith("-") else int("-100" + s)), None
     return None, (s.lower() or None)
-
-
-async def resolve_channel():
-    num, uname = chan_norm()
-    tg["chan_num"], title = num, ""
-    cl = tg["client"]
-    if cl and tg["state"] == "ready" and (num or uname):
-        try:
-            ent = await cl.get_entity(num if num else uname)
-            tg["chan_num"] = tl_utils.get_peer_id(ent)
-            title = getattr(ent, "title", "") or ""
-            log(f"Telegram: dang nghe kenh '{title}' ({tg['chan_num']})")
-        except Exception as e:
-            log(f"⚠️ Telegram: tai khoan chua thay kenh {cfg['channel_id']} — hay tham gia kenh truoc ({str(e)[:80]})")
-    cfg["channel_title"] = title
-    save_cfg()
 
 
 async def handle_channel_text(msg_id, text, age, source, t0):
@@ -505,47 +483,62 @@ async def handle_channel_text(msg_id, text, age, source, t0):
     await execute_signal(text, source, t0)
 
 
-async def on_tg_message(event):
-    try:
-        if not tg["chan_num"] or event.chat_id != tg["chan_num"]:
-            return
-        age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
-        await handle_channel_text(event.id, event.raw_text or "", age, "kenh", time.time())
-    except Exception as e:
-        log(f"Loi xu ly tin Telegram: {e}")
+def parse_preview(page):
+    """HTML cua t.me/s/<kenh> -> [(msg_id, text, timestamp)] tang dan theo id."""
+    out = []
+    for chunk in page.split('data-post="')[1:]:
+        m = re.match(r'[^"/]+/(\d+)"', chunk)
+        if not m:
+            continue
+        t = re.search(r'js-message_text"[^>]*>(.*?)</div>', chunk, re.S)
+        text = ""
+        if t:
+            text = re.sub(r"<br\s*/?>", "\n", t.group(1))
+            text = htmllib.unescape(re.sub(r"<[^>]+>", "", text))
+        ts = time.time()
+        d = re.findall(r'<time datetime="([^"]+)"', chunk)
+        if d:
+            try:
+                ts = datetime.fromisoformat(d[-1]).timestamp()
+            except Exception:
+                pass
+        out.append((int(m.group(1)), text, ts))
+    return sorted(out)
 
 
-async def tg_init():
-    """Tao/ket noi client theo api id/hash trong config."""
-    if TelegramClient is None:
-        tg["state"] = "need_config"
-        log("Chua cai telethon (chay start.bat de cai)")
-        return
-    creds = (str(cfg["tg_api_id"]).strip(), cfg["tg_api_hash"].strip())
-    if not all(creds):
-        tg["state"] = "need_config"
-        return
-    if tg["client"] and tg["creds"] == creds:
-        return
-    if tg["client"]:
+async def web_listen_loop():
+    cur, last_id = None, None
+    while True:
+        await asyncio.sleep(POLL_INTERVAL)
+        num, uname = chan_norm()
+        if not uname:
+            listen.update(mode="bot" if num else "none", ok=False, err="")
+            cur = None
+            continue
+        if uname != cur:
+            cur, last_id = uname, None
+        listen["mode"] = "web"
         try:
-            await tg["client"].disconnect()
-        except Exception:
-            pass
-    try:
-        cl = TelegramClient(SESSION_PATH, int(creds[0]), creds[1])
-        await cl.connect()
-        cl.add_event_handler(on_tg_message, events.NewMessage())
-        tg["client"], tg["creds"] = cl, creds
-        if await cl.is_user_authorized():
-            tg["state"] = "ready"
-            await cl.get_dialogs(limit=None)   # nap danh sach kenh de nhan update
-            log("Telegram: da dang nhap, dang nghe kenh")
-        else:
-            tg["state"] = "need_login"
-    except Exception as e:
-        tg["client"], tg["state"] = None, "need_config"
-        log(f"Telegram loi ket noi: {e}")
+            t0 = time.time()
+            async with http.get(f"https://t.me/s/{uname}",
+                                headers={"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"},
+                                timeout=aiohttp.ClientTimeout(total=6)) as r:
+                page = await r.text()
+            posts = parse_preview(page)
+            if not posts:
+                listen.update(ok=False, err="khong doc duoc kenh (kenh rieng tu, sai ten, hoac tat xem truoc)")
+                continue
+            listen.update(ok=True, err="", last=time.time())
+            if last_id is None:            # lan dau: chi ghi moc, khong vao lenh cu
+                last_id = posts[-1][0]
+                log(f"Dang nghe kenh cong khai @{uname} (tin moi nhat #{last_id})")
+                continue
+            for mid, text, ts in posts:
+                if mid > last_id:
+                    last_id = mid
+                    await handle_channel_text(mid, text, time.time() - ts, "kenh", t0)
+        except Exception as e:
+            listen.update(ok=False, err=str(e)[:100])
 
 
 # ----------------------------------------------------------------------------
@@ -591,7 +584,7 @@ async def bot_loop():
             if cp:   # bot la admin cua kenh phat lenh -> nghe truc tiep, khong can dang nhap
                 ch = cp.get("chat") or {}
                 num, uname = chan_norm()
-                if ch.get("id") in (num, tg["chan_num"]) or (uname and (ch.get("username") or "").lower() == uname):
+                if (num and ch.get("id") == num) or (uname and (ch.get("username") or "").lower() == uname):
                     try:
                         await handle_channel_text(cp["message_id"], cp.get("text") or "",
                                                   time.time() - cp.get("date", time.time()), "kenh-bot", time.time())
@@ -628,10 +621,9 @@ async def bot_loop():
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "tg_api_hash", "bot_token")}
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
-    c["has_api_hash"] = bool(cfg["tg_api_hash"])
     c["has_bot_token"] = bool(cfg["bot_token"])
     return c
 
@@ -647,8 +639,8 @@ async def h_state(req):
         accs.append({"name": c.name, "balance": st.get("balance"),
                      "positions": st.get("positions", []), "error": st.get("error", "")})
     return web.json_response({"version": VERSION, "running": cfg["running"], "mode": cfg["mode"],
-                              "accounts": accs, "logs": list(logs)[:120], "tg": tg["state"],
-                              "channel": cfg["channel_title"] or cfg["channel_id"], "bot": bool(cfg["bot_token"])})
+                              "accounts": accs, "logs": list(logs)[:120], "listen": listen,
+                              "channel": cfg["channel_id"], "bot": bool(cfg["bot_token"])})
 
 
 async def h_get_cfg(req):
@@ -666,7 +658,7 @@ async def h_save_cfg(req):
         secret = (a.get("secret") or "").strip() or old.get(key, "")
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
-    for k in ("env", "mode", "tg_api_id", "tg_phone", "bot_owner_id", "update_url",
+    for k in ("env", "mode", "bot_owner_id", "update_url",
               "channel_id"):
         if k in d:
             cfg[k] = str(d[k]).strip()
@@ -675,9 +667,8 @@ async def h_save_cfg(req):
             cfg[k] = max(0.0, float(d[k]))
         except Exception:
             pass
-    for k in ("tg_api_hash", "bot_token"):
-        if (d.get(k) or "").strip():
-            cfg[k] = d[k].strip()
+    if (d.get("bot_token") or "").strip():
+        cfg["bot_token"] = d["bot_token"].strip()
     save_cfg()
     rebuild_clients()
     instruments.clear()
@@ -686,8 +677,6 @@ async def h_save_cfg(req):
         await load_instruments()
     except Exception as e:
         log(f"Tai danh sach hop dong loi: {e}")
-    await tg_init()
-    await resolve_channel()
     log("💾 Da luu cai dat")
     return web.json_response({"ok": True})
 
@@ -711,45 +700,6 @@ async def h_manual(req):
     d = await req.json()
     msg = await execute_signal(d.get("text", ""), "tay")
     return web.json_response({"ok": True, "msg": msg})
-
-
-async def h_tg_send_code(req):
-    await tg_init()
-    cl = tg["client"]
-    if not cl:
-        return web.json_response({"ok": False, "msg": "Nhap API ID / API Hash roi bam Luu truoc"})
-    try:
-        await cl.send_code_request(cfg["tg_phone"])
-        tg["state"] = "code_sent"
-        return web.json_response({"ok": True, "msg": "Da gui ma vao app Telegram cua ban"})
-    except Exception as e:
-        return web.json_response({"ok": False, "msg": str(e)})
-
-
-async def h_tg_sign_in(req):
-    d = await req.json()
-    cl = tg["client"]
-    if not cl:
-        return web.json_response({"ok": False, "msg": "Chua ket noi Telegram"})
-    try:
-        if tg["state"] == "need_password":
-            await cl.sign_in(password=d.get("password", ""))
-        else:
-            try:
-                await cl.sign_in(cfg["tg_phone"], d.get("code", "").strip())
-            except SessionPasswordNeededError:
-                if d.get("password"):
-                    await cl.sign_in(password=d["password"])
-                else:
-                    tg["state"] = "need_password"
-                    return web.json_response({"ok": False, "msg": "Tai khoan co mat khau 2 lop — nhap mat khau roi bam Dang nhap lan nua"})
-        tg["state"] = "ready"
-        await cl.get_dialogs(limit=None)
-        await resolve_channel()
-        log("Telegram: dang nhap thanh cong")
-        return web.json_response({"ok": True, "msg": "Dang nhap thanh cong"})
-    except Exception as e:
-        return web.json_response({"ok": False, "msg": str(e)})
 
 
 async def h_update(req):
@@ -815,8 +765,8 @@ async def main():
         log(f"Da tai {n} hop dong USDT perp ({cfg['env']})")
     except Exception as e:
         log(f"Tai danh sach hop dong loi: {e}")
-    await tg_init()
-    await resolve_channel()
+    for k in ("tg_api_id", "tg_api_hash", "tg_phone", "channel_title"):
+        cfg.pop(k, None)
 
     app = web.Application(middlewares=[guard])
     app.add_routes([
@@ -824,7 +774,6 @@ async def main():
         web.post("/api/config", h_save_cfg), web.post("/api/start", h_start),
         web.post("/api/stop", h_stop), web.post("/api/close", h_close),
         web.post("/api/manual", h_manual), web.post("/api/update", h_update),
-        web.post("/api/tg/send_code", h_tg_send_code), web.post("/api/tg/sign_in", h_tg_sign_in),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
@@ -837,6 +786,7 @@ async def main():
             pass
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
+    asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()
 
 
@@ -879,7 +829,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 </header>
 
 <div class="card"><h2>Status</h2><div id="status" class="mut">Đang tải…</div>
-  <div class="mut" style="margin-top:8px;font-size:12px">Telegram: <span id="tgst"></span> · Kênh: <span id="chn"></span> · Bot điều khiển: <span id="botst"></span></div></div>
+  <div class="mut" style="margin-top:8px;font-size:12px">Nghe kênh: <span id="tgst"></span> · Kênh: <span id="chn"></span> · Bot điều khiển: <span id="botst"></span></div></div>
 
 <div class="grid">
 <div>
@@ -911,13 +861,8 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   </div>
 
   <div class="card"><h2>Telegram — nghe kênh</h2>
-    <label>Channel ID của kênh phát lệnh (vd -1001234567890 hoặc @tenkenh)</label><input id="channel_id">
+    <label>Channel ID của kênh phát lệnh (@tenkenh nếu kênh công khai, hoặc -100…)</label><input id="channel_id">
     <div class="mut" style="font-size:12px;margin-top:6px">Trạng thái: <span id="tgst2"></span></div>
-    <details id="tglogin" style="margin-top:10px"><summary style="cursor:pointer;color:var(--mut)">Đăng nhập Telegram (chỉ làm 1 lần)</summary>
-      <div class="row"><div><label>API ID</label><input id="tg_api_id"></div><div><label>API Hash</label><input id="tg_api_hash" type="password"></div></div>
-      <div class="row"><div><label>Số điện thoại (+84…)</label><input id="tg_phone"></div><button onclick="sendCode()">Lưu &amp; gửi mã</button></div>
-      <div class="row"><div><label>Mã đăng nhập</label><input id="tg_code"></div><div><label>Mật khẩu 2 lớp (nếu có)</label><input id="tg_pass" type="password"></div><button onclick="signIn()">Đăng nhập</button></div>
-    </details>
   </div>
 
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
@@ -939,22 +884,20 @@ async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Cont
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('m-custom').classList.toggle('sel',m=='custom');$('box-follow').style.display=m=='follow'?'':'none';$('box-custom').style.display=m=='custom'?'flex':'none'}
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_phone','bot_owner_id','update_url','channel_id'])$(k).value=cfg[k]??'';
-  $('tg_api_hash').placeholder=cfg.has_api_hash?'•••• đã lưu':'';$('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id'])$(k).value=cfg[k]??'';
+  $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
   const o={accounts,mode};
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_api_hash','tg_phone','bot_token','bot_owner_id','update_url','channel_id'])o[k]=$(k).value;return o}
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
-async function sendCode(){await post('/api/config',collect());await post('/api/tg/send_code')}
-async function signIn(){const j=await post('/api/tg/sign_in',{code:$('tg_code').value,password:$('tg_pass').value});if(j&&j.ok)$('tglogin').open=false}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
 async function update(){const j=await post('/api/update');if(j&&j.restart)setTimeout(()=>location.reload(),5000)}
-const TG={need_config:'chưa cài API',need_login:'chưa đăng nhập',code_sent:'đã gửi mã, chờ nhập',need_password:'cần mật khẩu 2 lớp',ready:'✅ đang nghe'};
+function lst(s){const l=s.listen;if(l.mode=='web')return l.ok?'✅ đang đọc kênh công khai':'⚠ '+(l.err||'đang kết nối…');if(l.mode=='bot')return s.bot?'qua bot (bot của bạn phải là admin kênh)':'⚠ ID dạng số cần bot của bạn làm admin kênh — hoặc nhập @tenkenh nếu kênh công khai';return '⚠ chưa nhập Channel ID'}
 async function refresh(){try{const s=await(await fetch('/api/state')).json();
   $('run').textContent=s.running?'ĐANG CHẠY':'ĐANG DỪNG';$('run').className='pill '+(s.running?'on':'off');
-  $('tgst').textContent=TG[s.tg]||s.tg;$('tgst2').textContent=s.tg=='ready'?'✅ đã đăng nhập, đang nghe'+(s.channel?' kênh: '+s.channel:' (chưa nhập Channel ID)'):'⚠ chưa đăng nhập Telegram — mở mục bên dưới, làm 1 lần';if(!window._tgi){window._tgi=1;$('tglogin').open=s.tg!='ready'}$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=s.bot?'đã cài':'chưa cài';
+  $('tgst').textContent=$('tgst2').textContent=lst(s);$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=s.bot?'đã cài':'chưa cài';
   $('status').innerHTML=s.accounts.length?s.accounts.map(a=>{let body;
     if(a.error)body=`<span class="neg">⚠ ${esc(a.error)}</span>`;
     else if(!a.positions.length)body='<span class="mut">không có position</span>';

@@ -27,7 +27,7 @@ if not exist bybit_copy.py (
 )
 
 echo Dang kiem tra thu vien...
-python -m pip install -q --disable-pip-version-check aiohttp telethon
+python -m pip install -q --disable-pip-version-check aiohttp
 set BYBITCOPY_LAUNCHER=1
 :loop
 python bybit_copy.py

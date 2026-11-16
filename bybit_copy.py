@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -171,6 +171,16 @@ class Bybit:
         self.name, self.key, self.secret, self.base = name, key, secret.encode(), base
 
     async def req(self, method, path, params=None, auth=True):
+        r = await self._req(method, path, params, auth)
+        if auth and is_time_error(r):
+            # Dong ho may lech so voi Bybit -> dong bo lai ngay roi gui lai 1 lan
+            await sync_time(force=True)
+            r = await self._req(method, path, params, auth)
+            if is_time_error(r):
+                r["retMsg"] = "Lệch giờ với Bybit — tool đang tự đồng bộ lại, thử lại sau vài giây"
+        return r
+
+    async def _req(self, method, path, params=None, auth=True):
         params = params or {}
         headers = {}
         if method == "GET":
@@ -245,13 +255,32 @@ def rebuild_clients():
             status.pop(k, None)
 
 
-async def sync_time():
+def is_time_error(r):
+    return r.get("retCode") == 10002 or "timestamp" in str(r.get("retMsg", "")).lower()
+
+
+_sync = {"t": 0.0, "lock": None}
+
+
+async def sync_time(force=False):
+    """Tinh do lech giua dong ho may va Bybit. Bybit tu choi lenh neu gio gui di
+    som hon gio server qua 1 giay hoac tre hon 10 giay."""
     global time_offset
-    try:
-        r = await public_client().req("GET", "/v5/market/time", auth=False)
-        time_offset = int(int(r["result"]["timeNano"]) / 1e6) - int(time.time() * 1000)
-    except Exception as e:
-        log(f"Không đồng bộ được giờ Bybit: {e}")
+    if _sync["lock"] is None:
+        _sync["lock"] = asyncio.Lock()
+    async with _sync["lock"]:
+        if time.time() - _sync["t"] < (1 if force else 20):
+            return                     # vua dong bo xong (nhieu acc cung goi 1 luc)
+        try:
+            r = await public_client()._req("GET", "/v5/market/time", auth=False)
+            server = int(int(r["result"]["timeNano"]) / 1e6)
+            new = server - int(time.time() * 1000) - 300   # lui 300ms cho an toan
+            if abs(new - time_offset) > 1500:
+                log(f"🕒 Đồng hồ máy lệch {new / 1000:+.1f}s so với Bybit — đã tự bù")
+            time_offset = new
+            _sync["t"] = time.time()
+        except Exception as e:
+            log(f"Không đồng bộ được giờ Bybit: {e}")
 
 
 def _store_instrument(it):
@@ -726,8 +755,9 @@ async def status_loop():
             if clients:
                 await asyncio.gather(*(one(c) for c in clients))
             n += 1
-            if n % 200 == 0:   # ~10 phut
+            if n % 20 == 0:    # ~1 phut: dong ho may co the bi Windows chinh lai bat cu luc nao
                 await sync_time()
+            if n % 200 == 0:   # ~10 phut
                 await load_instruments()
         except Exception as e:
             log(f"status loop: {e}")

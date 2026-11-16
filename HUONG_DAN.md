@@ -41,5 +41,6 @@ API key **không** nằm trong `bybit_copy.py` mà nằm trong `config.json` tr�
 - Lệnh: `m #coin size tp sl` — ví dụ `m #space 1 10 2` = Long SPACEUSDT, position 1000 USDT, TP +10%, SL −2%.
 - Đòn bẩy tự tính = nhỏ nhất đủ mở position với số dư khả dụng (trừ hao 5% cho phí). Số dư 100 USDT, size 1000 → x11.
 - Nếu vượt max đòn bẩy của coin, tool tự giảm size xuống mức tối đa mở được và ghi rõ trong log.
+- Tốc độ: giá và số dư được cập nhật sẵn ở nền, đòn bẩy được đặt song song với lệnh, nên mỗi acc chỉ cần một lượt gửi tới Bybit. Con số "ms" trong tin báo là thời gian từ lúc tool nhận lệnh tới lúc cả 5 acc được Bybit xác nhận.
 - TP/SL gắn ngay vào lệnh market, sau khi khớp được chỉnh lại theo đúng giá entry thực tế.
 - Tool chỉ vào lệnh khi đang **ĐANG CHẠY**; tin cũ hơn 60 giây bị bỏ qua.

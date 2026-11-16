@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.9"
+VERSION = "1.1.0"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -52,6 +52,9 @@ clients = []           # list[Bybit]
 http = None            # aiohttp.ClientSession
 time_offset = 0        # ms lech gio so voi Bybit
 seen_msgs = deque(maxlen=200)
+prices = {"t": 0.0, "map": {}}   # gia moi nhat cua tat ca hop dong (cap nhat moi giay)
+lev_cache = {}                   # (ten acc, symbol) -> don bay da dat tren Bybit
+PRICE_MAX_AGE = 4
 
 
 def log(msg):
@@ -233,6 +236,7 @@ def rebuild_clients():
     base = ENVS.get(cfg["env"], ENVS["mainnet"])
     clients = [Bybit(a.get("name") or f"Acc{i+1}", a["key"], a["secret"], base)
                for i, a in enumerate(cfg["accounts"]) if a.get("key") and a.get("secret")]
+    lev_cache.clear()
     for k in list(status):
         if k not in [c.name for c in clients]:
             status.pop(k, None)
@@ -296,12 +300,59 @@ async def resolve_symbol(coin):
 # ----------------------------------------------------------------------------
 # Vao lenh
 # ----------------------------------------------------------------------------
+async def set_lev(c, symbol, lev):
+    """Dat don bay; tra ve None neu ok, nguoc lai tra ve thong bao loi."""
+    try:
+        r = await c.req("POST", "/v5/position/set-leverage",
+                        {"category": "linear", "symbol": symbol,
+                         "buyLeverage": f"{lev:g}", "sellLeverage": f"{lev:g}"})
+        if r.get("retCode") in (0, 110043):
+            lev_cache[(c.name, symbol)] = float(lev)
+            return None
+        return str(r.get("retMsg"))
+    except Exception as e:
+        return str(e)
+
+
+async def price_loop():
+    """Lay gia tat ca hop dong moi giay de luc vao lenh khong phai hoi gia nua."""
+    while True:
+        try:
+            if clients:
+                r = await public_client().req("GET", "/v5/market/tickers", {"category": "linear"}, auth=False)
+                if r.get("retCode") == 0:
+                    m = {}
+                    for t in r["result"]["list"]:
+                        try:
+                            m[t["symbol"]] = float(t["lastPrice"])
+                        except Exception:
+                            pass
+                    prices["map"], prices["t"] = m, time.time()
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+
+async def get_price(symbol):
+    if time.time() - prices["t"] <= PRICE_MAX_AGE and symbol in prices["map"]:
+        return prices["map"][symbol], None
+    r = await public_client().req("GET", "/v5/market/tickers",
+                                  {"category": "linear", "symbol": symbol}, auth=False)
+    try:
+        return float(r["result"]["list"][0]["lastPrice"]), None
+    except Exception:
+        return None, r.get("retMsg")
+
+
 async def open_one(c, symbol, notional, tp, sl, price, allin=None):
     """allin = None: lenh co size. allin = ("lev", so) hoac ("max",): all-in toan bo so du."""
     ins = instruments[symbol]
     try:
         if allin:
-            avail = await c.balance()          # all-in: lay so du moi nhat
+            st = status.get(c.name) or {}      # so du duoc cap nhat moi 3 giay
+            avail = st.get("balance") if time.time() - st.get("t", 0) < 8 else None
+            if avail is None:
+                avail = await c.balance()
             if avail <= 0:
                 return f"❌ {c.name}: số dư = 0"
             want = allin[1] if allin[0] == "lev" else None
@@ -317,11 +368,11 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
             if lev is None:
                 return f"❌ {c.name}: số dư = 0"
             note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev})"
-        r = await c.req("POST", "/v5/position/set-leverage",
-                        {"category": "linear", "symbol": symbol,
-                         "buyLeverage": f"{lev:g}", "sellLeverage": f"{lev:g}"})
-        if r.get("retCode") not in (0, 110043):
-            return f"❌ {c.name}: đặt đòn bẩy x{lev} lỗi: {r.get('retMsg')}"
+        # Dat don bay SONG SONG voi lenh (khong cho) -> tiet kiem 1 luot di-ve toi Bybit.
+        # Neu da biet don bay dang dung thi bo qua luon.
+        lev_task = None
+        if lev_cache.get((c.name, symbol)) != float(lev):
+            lev_task = asyncio.create_task(set_lev(c, symbol, lev))
         qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
         if qty < ins["min"]:
             return f"❌ {c.name}: size quá nhỏ (min {fmt(ins['min'])})"
@@ -334,20 +385,34 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
             tpsl["stopLoss"] = fmt(round_tick(D(price) * (1 - D(sl) / 100), ins["tick"]))
         if tpsl:
             tpsl["tpslMode"] = "Full"
-        r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
-        if r.get("retCode") != 0 and "position idx" in str(r.get("retMsg", "")).lower():
-            order["positionIdx"] = 1   # tai khoan dang o hedge mode
+
+        async def place():
             r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
+            if r.get("retCode") != 0 and "position idx" in str(r.get("retMsg", "")).lower():
+                order["positionIdx"] = 1   # tai khoan dang o hedge mode
+                r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
+            if r.get("retCode") != 0 and tpsl and lev_task is None:
+                # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
+                r = await c.req("POST", "/v5/order/create", order)
+            return r
+
+        r = await place()
+        lev_err = None
+        if lev_task:
+            lev_err = await lev_task
+            lev_task = None
+            if r.get("retCode") != 0 and not lev_err:
+                r = await place()          # lenh den truoc khi don bay kip doi -> gui lai
         if r.get("retCode") != 0 and allin and "insufficient" in str(r.get("retMsg", "")).lower():
             real *= 0.9                # thieu ky quy -> thu lai voi 90% size
             qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
             order["qty"] = fmt(qty)
-            r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
-        if r.get("retCode") != 0 and tpsl:
-            # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
-            r = await c.req("POST", "/v5/order/create", order)
+            r = await place()
         if r.get("retCode") != 0:
-            return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}"
+            extra = f" | đặt đòn bẩy x{lev:g} lỗi: {lev_err}" if lev_err else ""
+            return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}{extra}"
+        if lev_err:
+            note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"]))
         return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{real:.0f} USDT, x{lev:g}){note}"
     except Exception as e:
@@ -406,12 +471,9 @@ async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
         msg = f"❌ Không tìm thấy hợp đồng {cmd['coin']}USDT trên Bybit"
         log(msg); asyncio.create_task(notify(msg))
         return msg
-    r = await public_client().req("GET", "/v5/market/tickers",
-                                  {"category": "linear", "symbol": symbol}, auth=False)
-    try:
-        price = float(r["result"]["list"][0]["lastPrice"])
-    except Exception:
-        msg = f"❌ Không lấy được giá {symbol}: {r.get('retMsg')}"
+    price, perr = await get_price(symbol)
+    if price is None:
+        msg = f"❌ Không lấy được giá {symbol}: {perr}"
         log(msg); asyncio.create_task(notify(msg))
         return msg
     res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin) for c in clients))
@@ -476,7 +538,12 @@ async def status_loop():
     async def one(c):
         try:
             bal, pos = await asyncio.gather(c.balance(), c.positions())
-            status[c.name] = {"balance": bal, "positions": pos, "error": ""}
+            status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time()}
+            for p in pos:
+                try:
+                    lev_cache[(c.name, p["symbol"])] = float(p["lev"])
+                except Exception:
+                    pass
         except Exception as e:
             prev = status.get(c.name) or {}
             status[c.name] = {"balance": prev.get("balance"), "positions": prev.get("positions", []),
@@ -994,6 +1061,7 @@ async def main():
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
     asyncio.create_task(tg_keepalive())
+    asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()
 

@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,6 +37,7 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
+    "live_msg": None,               # [chat, message_id, rich] cua tin /status dang tu cap nhat
     "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
     "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
@@ -668,7 +669,7 @@ def status_text():
     return "\n".join(lines)
 
 
-def status_blocks(title=None):
+def status_blocks(title=None, stamp=None):
     run = cfg["running"]
     blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}"),
               r_par(["Chế độ: ", B("Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"),
@@ -695,6 +696,8 @@ def status_blocks(title=None):
         blocks.append(r_foot("Phí = phí đã trả của position đang mở. Đơn vị: USDT."))
     else:
         blocks.append(r_par("Chưa cài sub account nào."))
+    if stamp:
+        blocks.append(r_foot(stamp))
     return blocks
 
 
@@ -851,7 +854,7 @@ def parse_allin(text):
 HELP_ITEMS = [
     ("/start", "Chạy bot — bắt đầu nghe lệnh từ kênh"),
     ("/stop", "Dừng bot — position đang mở giữ nguyên"),
-    ("/status", "Xem position, phí và PnL từng acc"),
+    ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
     ("/lev N", "Đặt đòn bẩy cho /allin. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
@@ -907,11 +910,12 @@ async def _send(chat, text):
         if r.get("ok"):
             if attempt > 1:
                 log(f"Bot đã gửi được tin sau {attempt} lần thử (mạng tới Telegram chập chờn)")
-            return
+            return (r.get("result") or {}).get("message_id"), False
         desc = str(r.get("description"))
         if "Timeout" not in desc and "Connect" not in desc and "Disconnected" not in desc:
             break                      # loi tu Telegram (khong phai mang) -> thu lai vo ich
     log(f"⚠️ Bot không gửi được tin trả lời: {desc}")
+    return None, False
 
 
 async def _send_rich(chat, text, blocks):
@@ -921,7 +925,7 @@ async def _send_rich(chat, text, blocks):
             r = await bot_api("sendRichMessage", _quiet=True, chat_id=chat, rich_message={"blocks": blocks})
             if r.get("ok"):
                 botst["rich"] = True
-                return
+                return (r.get("result") or {}).get("message_id"), True
             desc = str(r.get("description"))
             if "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
                 continue               # loi mang -> thu lai
@@ -929,7 +933,79 @@ async def _send_rich(chat, text, blocks):
                 botst["rich"] = False     # Bot API chua co sendRichMessage -> thoi khong thu nua
             log(f"Rich message bị Telegram từ chối ({desc[:120]}) — gửi bản chữ thay thế")
             break
-    await _send(chat, text)
+    return await _send(chat, text)
+
+
+# --- /status tu cap nhat: tool sua thang vao tin /status moi nhat ---
+live = {"chat": None, "mid": None, "rich": True, "sig": "", "t": 0.0, "wait": 0.0}
+LIVE_EVERY = 3         # giay giua 2 lan sua tin (khi so lieu thay doi)
+LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
+
+
+def live_stamp():
+    return f"🔄 Tự cập nhật · lần cuối {datetime.now().strftime('%H:%M:%S')}"
+
+
+def live_stop(why=""):
+    if live["mid"] and why:
+        log(f"Dừng tự cập nhật tin /status: {why}")
+    live.update(chat=None, mid=None)
+    if cfg.get("live_msg"):
+        cfg["live_msg"] = None
+        save_cfg()
+
+
+async def start_live(chat):
+    old = (live["chat"], live["mid"], live["rich"])
+    live_stop()
+    if old[1]:                         # danh dau tin cu la da ngung
+        asyncio.create_task(live_edit(*old, final=True))
+    mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()))
+    if mid:
+        live.update(chat=chat, mid=mid, rich=rich, sig=json.dumps(status_blocks(), ensure_ascii=False),
+                    t=time.time(), wait=0.0)
+        cfg["live_msg"] = [chat, mid, rich]
+        save_cfg()
+
+
+async def live_edit(chat, mid, rich, final=False):
+    stamp = "⏹ Đã ngừng cập nhật — xem tin /status mới hơn" if final else live_stamp()
+    p = {"chat_id": chat, "message_id": mid}
+    if rich:
+        p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
+    else:
+        p["text"] = (status_text() + "\n" + stamp)[:4000]
+    return await bot_api("editMessageText", _quiet=True, **p)
+
+
+async def live_loop():
+    lm = cfg.get("live_msg")
+    if lm:                             # tiep tuc sau khi tool khoi dong lai / update
+        live.update(chat=lm[0], mid=lm[1], rich=bool(lm[2]))
+    while True:
+        await asyncio.sleep(1)
+        try:
+            if not live["mid"] or not cfg["bot_token"]:
+                continue
+            now = time.time()
+            if now < live["wait"] or now - live["t"] < LIVE_EVERY:
+                continue
+            sig = json.dumps(status_blocks(), ensure_ascii=False)
+            if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
+                continue
+            r = await live_edit(live["chat"], live["mid"], live["rich"])
+            desc = str(r.get("description") or "")
+            if r.get("ok") or "not modified" in desc:
+                live.update(sig=sig, t=time.time())
+            elif "Too Many Requests" in desc or "retry after" in desc.lower():
+                wait = float((r.get("parameters") or {}).get("retry_after") or 10)
+                live["wait"] = time.time() + wait + 1
+            elif "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
+                live["wait"] = time.time() + 5
+            else:                      # tin da bi xoa / khong sua duoc nua
+                live_stop(desc[:100])
+        except Exception as e:
+            log(f"live status: {type(e).__name__}: {e}")
 
 
 def send_rich(chat, text, blocks):
@@ -1029,7 +1105,7 @@ async def handle_update(u):
                 send_rich(chat, *(await close_all()))
                 return
             elif cmd == "/status":
-                send_rich(chat, status_text(), status_blocks())
+                asyncio.create_task(start_live(chat))
                 return
             elif cmd == "/lev":
                 arg = (m.get("text") or "").split()[1:2]
@@ -1078,7 +1154,7 @@ async def handle_update(u):
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token")}
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
     c["has_bot_token"] = bool(cfg["bot_token"])
@@ -1258,6 +1334,7 @@ async def main():
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
     asyncio.create_task(tg_keepalive())
+    asyncio.create_task(live_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()

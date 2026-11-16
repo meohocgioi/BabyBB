@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,6 +37,8 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
+    "auto_update": True,            # tu kiem tra GitHub va tu cap nhat
+    "update_note": "",              # tin bao se gui qua bot sau khi khoi dong lai
     "live_msg": None,               # [chat, message_id, rich] cua tin /status dang tu cap nhat
     "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
     "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
@@ -497,6 +499,14 @@ async def execute_signal(text, source="telegram", t0=None):
 
 
 async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
+    busy["n"] += 1
+    try:
+        return await _execute_order(coin, notional, tp, sl, source, t0, allin)
+    finally:
+        busy["n"] -= 1
+
+
+async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
     """Mo Long coin voi gia tri position = notional USDT tren tat ca sub account."""
     t0 = t0 or time.time()
     cmd = {"coin": coin.upper()}
@@ -640,7 +650,11 @@ async def close_one(c):
 
 async def close_all():
     """-> (ban chu, blocks cua rich message)"""
-    res = await asyncio.gather(*(close_one(c) for c in clients))
+    busy["n"] += 1
+    try:
+        res = await asyncio.gather(*(close_one(c) for c in clients))
+    finally:
+        busy["n"] -= 1
     rows = [x for sub in res for x in sub]
     if not rows:
         log("Không có position nào đang mở")
@@ -894,13 +908,14 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
+    ("/update", "Cập nhật tool lên bản mới nhất ngay (tool cũng tự kiểm tra mỗi 5 phút)"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
 
 
 def help_blocks():
-    return [r_head("📖 Các lệnh"),
+    return [r_head(f"📖 Các lệnh — v{VERSION}"),
             r_table(["Lệnh", "Tác dụng"], [[K(c), d] for c, d in HELP_ITEMS])]
 
 
@@ -1089,6 +1104,10 @@ async def bot_loop():
                 botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")
                 botst["token"] = cfg["bot_token"]
                 log(f"🤖 Bot Telegram đã kết nối: {botst['name']} — hãy nhắn lệnh cho đúng bot này")
+                if cfg.get("update_note"):
+                    await notify(cfg["update_note"] + f"\nTool v{VERSION} đang chạy bình thường.")
+                    cfg["update_note"] = ""
+                    save_cfg()
             botst.update(ok=True, err="", last=time.time())
             for u in r["result"]:
                 offset = u["update_id"] + 1
@@ -1171,6 +1190,10 @@ async def handle_update(u):
                     log(f"🛒 /allin {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
                     return
+            elif cmd == "/update":
+                log("⬆️ /update (từ Telegram)")
+                ok, msg, rs = await do_update("lệnh /update")
+                reply = ("⬆️ " if ok else "⚠️ ") + msg + ("\nBot sẽ báo lại sau vài giây." if rs else "")
             elif cmd == "/buy":
                 b = parse_buy(m.get("text") or "")
                 if not b:
@@ -1190,7 +1213,7 @@ async def handle_update(u):
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg")}
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
     c["has_bot_token"] = bool(cfg["bot_token"])
@@ -1227,6 +1250,8 @@ async def h_save_cfg(req):
         secret = (a.get("secret") or "").strip() or old.get(key, "")
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
+    if "auto_update" in d:
+        cfg["auto_update"] = str(d["auto_update"]) != "0"
     if "widgets" in d:
         cfg["widgets"] = str(d["widgets"]) != "0"
         botst.pop("rich", None)
@@ -1284,37 +1309,131 @@ async def h_manual(req):
     return web.json_response({"ok": True, "msg": msg})
 
 
-async def h_update(req):
+busy = {"n": 0}            # so lenh dang vao/dong -> khong khoi dong lai giua chung
+PENDING = os.path.join(BASE_DIR, "update_pending")   # danh dau "vua update, chua chay on dinh"
+AUTO_CHECK_EVERY = 300     # giay giua 2 lan tu kiem tra ban moi
+
+
+def _api_url(url):
+    """Link raw.githubusercontent.com bi cache ~5 phut -> doi sang GitHub API (luon moi nhat)."""
+    m = re.match(r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$", url)
+    return f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/contents/{m.group(4)}?ref={m.group(3)}" if m else None
+
+
+async def fetch_latest():
+    """-> (code, None) hoac (None, ly do loi)"""
     url = cfg["update_url"].strip()
     if not url:
-        return web.json_response({"ok": False, "msg": "Chưa nhập link update (GitHub raw) trong Cài đặt"})
+        return None, "Chưa nhập link update (GitHub raw) trong Cài đặt"
+    api = _api_url(url)
+    tries = ([(api, {"Accept": "application/vnd.github.raw"})] if api else []) + \
+            [(f"{url}{'&' if '?' in url else '?'}t={int(time.time())}", {})]
+    err = ""
+    for u, h in tries:
+        try:
+            async with http.get(u, headers=h) as r:
+                if r.status == 200:
+                    return await r.text(), None
+                err = f"Tải file lỗi HTTP {r.status}"
+        except Exception as e:
+            err = f"{type(e).__name__}: {str(e)[:80]}"
+    return None, err
+
+
+def _selftest_file(path):
+    import subprocess
     try:
-        sep = "&" if "?" in url else "?"
-        async with http.get(f"{url}{sep}t={int(time.time())}") as r:
-            if r.status != 200:
-                return web.json_response({"ok": False, "msg": f"Tải file lỗi HTTP {r.status}"})
-            code = await r.text()
-        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', code, re.M)
-        if not m:
-            return web.json_response({"ok": False, "msg": "File tải về không phải tool này (thiếu VERSION)"})
-        compile(code, "bybit_copy.py", "exec")
-        if m.group(1) == VERSION:
-            return web.json_response({"ok": True, "msg": f"Đang là bản mới nhất ({VERSION})"})
-        me = os.path.abspath(__file__)
-        with open(me, "r", encoding="utf-8") as f:
-            old = f.read()
-        with open(me + ".bak", "w", encoding="utf-8") as f:
-            f.write(old)
-        with open(me, "w", encoding="utf-8", newline="\n") as f:
-            f.write(code)
-        log(f"⬆️ Update {VERSION} -> {m.group(1)}, đang khởi động lại...")
-        asyncio.get_event_loop().call_later(1.0, restart)
-        return web.json_response({"ok": True, "restart": True,
-                                  "msg": f"Đã update lên {m.group(1)} — tool tự khởi động lại"})
-    except SyntaxError as e:
-        return web.json_response({"ok": False, "msg": f"Bản mới bị lỗi code, giữ bản cũ: {e}"})
+        r = subprocess.run([sys.executable, path, "--selftest"], capture_output=True, timeout=60)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace").strip().splitlines()
+        return r.returncode == 0, (out[-1] if out else f"exit {r.returncode}")
     except Exception as e:
-        return web.json_response({"ok": False, "msg": str(e)})
+        return False, str(e)
+
+
+async def do_update(source="tool"):
+    """Tai ban moi, kiem tra, thay file va khoi dong lai. -> (ok, msg, restart)"""
+    code, err = await fetch_latest()
+    if code is None:
+        return False, err, False
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', code, re.M)
+    if not m:
+        return False, "File tải về không phải tool này (thiếu VERSION)", False
+    new = m.group(1)
+    if new == VERSION:
+        return True, f"Đang là bản mới nhất ({VERSION})", False
+    try:
+        compile(code, "bybit_copy.py", "exec")
+    except SyntaxError as e:
+        return False, f"Bản {new} bị lỗi code, giữ bản {VERSION}: {e}", False
+    me = os.path.abspath(__file__)
+    tmp = os.path.join(BASE_DIR, "bybit_copy_new.py")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(code)
+    ok, why = await asyncio.to_thread(_selftest_file, tmp)   # chay thu ban moi truoc khi thay
+    if not ok:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return False, f"Bản {new} không qua được bước tự kiểm tra, giữ bản {VERSION}: {why[:150]}", False
+    for _ in range(60):                # doi lenh dang vao/dong xong
+        if not busy["n"]:
+            break
+        await asyncio.sleep(0.5)
+    with open(me, "r", encoding="utf-8") as f:
+        old = f.read()
+    with open(me + ".bak", "w", encoding="utf-8", newline="\n") as f:
+        f.write(old)
+    os.replace(tmp, me)
+    with open(PENDING, "w") as f:
+        f.write(VERSION)
+    cfg["update_note"] = f"⬆️ Đã cập nhật {VERSION} → {new} ({source})"
+    save_cfg()
+    log(f"⬆️ Update {VERSION} -> {new} ({source}), đang khởi động lại...")
+    asyncio.get_event_loop().call_later(1.0, restart)
+    return True, f"Đã update lên {new} — tool tự khởi động lại", True
+
+
+async def h_update(req):
+    ok, msg, rs = await do_update("bấm nút trên tool")
+    return web.json_response({"ok": ok, "msg": msg, "restart": rs})
+
+
+async def auto_update_loop():
+    await asyncio.sleep(45)
+    if os.path.exists(PENDING):        # ban moi da chay on dinh 45s -> xoa dau "cho kiem chung"
+        try:
+            os.remove(PENDING)
+        except Exception:
+            pass
+    last_err = ""
+    while True:
+        try:
+            if cfg.get("auto_update", True):
+                ok, msg, rs = await do_update("tự động")
+                if not ok and msg != last_err:
+                    last_err = msg
+                    if "không qua được" in msg or "lỗi code" in msg:
+                        log(f"⚠️ Tự cập nhật: {msg}")
+                        await notify(f"⚠️ Tự cập nhật thất bại: {msg}")
+        except Exception as e:
+            log(f"auto update: {type(e).__name__}: {e}")
+        await asyncio.sleep(AUTO_CHECK_EVERY)
+
+
+def selftest():
+    """Chay boi ban cu truoc khi thay file: ban moi phai tu chay duoc cac ham chinh."""
+    assert parse_command("m #space 1 10 2") == {"coin": "SPACE", "size": 1, "tp": 10, "sl": 2}
+    assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/allin #x 1 2")["coin"] == "X"
+    assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
+    global clients
+    clients = [Bybit("Acc1", "k", "s", "x")]
+    status["Acc1"] = {"balance": 1.0, "error": "", "t": 0, "positions": [
+        {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
+         "lev": "1", "idx": 0, "fee": 0.01}]}
+    json.dumps([status_blocks(stamp="x"), help_blocks()])
+    assert status_text() and HELP_TEXT and "__VERSION__" in HTML and chan_norm() is not None
+    print("selftest ok", VERSION)
 
 
 def restart():
@@ -1370,6 +1489,7 @@ async def main():
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
     asyncio.create_task(tg_keepalive())
+    asyncio.create_task(auto_update_loop())
     asyncio.create_task(live_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
@@ -1462,6 +1582,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 
   <div class="card"><h2>Update</h2>
     <label>Link GitHub raw của file bybit_copy.py</label><input id="update_url" placeholder="https://raw.githubusercontent.com/&lt;user&gt;/&lt;repo&gt;/main/bybit_copy.py">
+    <label>Tự động cập nhật</label><select id="auto_update"><option value="1">Bật — tự kiểm tra mỗi 5 phút và tự cập nhật</option><option value="0">Tắt — chỉ cập nhật khi bấm nút hoặc gõ /update</option></select>
   </div>
   <button class="b-bl" onclick="save()">💾 Lưu cài đặt</button>
 </div>
@@ -1475,11 +1596,11 @@ function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id','allin_lev'])$(k).value=cfg[k]??'';
   $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
-  $('widgets').value=cfg.widgets===false?'0':'1';
+  $('widgets').value=cfg.widgets===false?'0':'1';$('auto_update').value=cfg.auto_update===false?'0':'1';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
-  const o={accounts,mode,widgets:$('widgets').value};
+  const o={accounts,mode,widgets:$('widgets').value,auto_update:$('auto_update').value};
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
@@ -1508,7 +1629,31 @@ if __name__ == "__main__":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except Exception:
             pass
+    if "--selftest" in sys.argv:
+        selftest()
+        sys.exit(0)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        # Ban vua update bi loi luc khoi dong -> tu quay ve ban cu roi chay lai
+        import traceback
+        traceback.print_exc()
+        me = os.path.abspath(__file__)
+        if os.path.exists(PENDING) and os.path.exists(me + ".bak"):
+            try:
+                with open(me + ".bak", "r", encoding="utf-8") as f:
+                    old = f.read()
+                with open(me, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(old)
+                os.remove(PENDING)
+                load_cfg()
+                cfg["update_note"] = f"⚠️ Bản {VERSION} lỗi khi khởi động ({type(e).__name__}: {str(e)[:80]}) — đã tự quay về bản cũ"
+                cfg["auto_update"] = False     # tranh vong lap update -> loi -> quay ve
+                save_cfg()
+                print("Da quay ve ban cu, dang chay lai...")
+                restart()
+            except Exception:
+                traceback.print_exc()
+        raise

@@ -3,3 +3,5 @@ config.json.tmp
 tg_session*
 *.bak
 __pycache__/
+update_pending
+bybit_copy_new.py

@@ -35,6 +35,8 @@ Bot cũng tự báo về Telegram mỗi khi tool vào lệnh.
 Link update đã gắn sẵn vào repo https://github.com/meohocgioi/BabyBB — không cần dán gì.
 Mỗi khi có bản mới được đẩy lên repo, bấm **Update New Ver** → tool tự tải, kiểm tra và khởi động lại. Cài đặt của bạn giữ nguyên.
 
+Tool cũng **tự cập nhật**: mỗi 5 phút nó kiểm tra repo, có bản mới thì tự tải, chạy thử, thay file và khởi động lại, rồi báo qua bot Telegram. Muốn cập nhật ngay thì gõ `/update` cho bot. Bản mới lỗi khi khởi động thì tool tự quay về bản cũ. Tắt được trong mục Update trên tool.
+
 API key **không** nằm trong `bybit_copy.py` mà nằm trong `config.json` trên máy bạn — đừng bao giờ upload `config.json` lên GitHub.
 
 ## 6. Cách tool vào lệnh

@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,7 +37,7 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
-    "widgets": True,                # tin nhan bot dang widget (Telegram moi) hay chu thuong
+    "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
     "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
@@ -496,26 +496,49 @@ async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
 
 
 # ---------------------------------------------------------------------------
-# Trinh bay tin nhan bot: ban chu (fallback) + ban widget HTML (Telegram moi)
+# Trinh bay tin nhan bot: ban chu (fallback) + ban Rich Message (Bot API 10.1+)
+# Rich message = danh sach "blocks": heading / paragraph / table / footer.
 # ---------------------------------------------------------------------------
-W_CSS = (
-    "<style>"
-    "body{margin:0;padding:11px 13px;font:14px/1.38 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
-    "color:var(--tg-theme-text-color)}"
-    ".h{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:6px}"
-    ".h span:first-child{flex:1}"
-    ".pill{font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;color:#fff;white-space:nowrap}"
-    ".g{color:#1fa85a}.r{color:#e5484d}.bg{background:#1fa85a}.br{background:#e5484d}.bn{background:#8a8f98}"
-    ".m{color:var(--tg-theme-hint-color);font-size:12px}"
-    ".c{border-top:1px solid rgba(128,128,128,.28);padding:7px 0 6px}"
-    ".row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
-    ".n{font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap}"
-    ".t{font-weight:600}"
-    "code{font:600 13px ui-monospace,Menlo,Consolas,monospace;color:var(--tg-theme-link-color)}"
-    ".f{border-top:1px solid rgba(128,128,128,.28);padding-top:7px;margin-top:1px}"
-    "</style>"
-)
-esc = htmllib.escape
+def B(t):
+    return {"type": "bold", "text": t}
+
+
+def K(t):
+    return {"type": "code", "text": t}
+
+
+def cell(text, header=False, align=None):
+    c = {"text": text} if text != "" else {}
+    if header:
+        c["is_header"] = True
+    if align:
+        c["align"] = align
+    return c
+
+
+def r_head(text, size=3):
+    return {"type": "heading", "text": text, "size": size}
+
+
+def r_par(text):
+    return {"type": "paragraph", "text": text}
+
+
+def r_table(header, rows, aligns=None):
+    aligns = aligns or [None] * len(header)
+    cells = [[cell(B(h), True, a) for h, a in zip(header, aligns)]]
+    cells += [[cell(v, False, a) for v, a in zip(r, aligns)] for r in rows]
+    return {"type": "table", "cells": cells, "is_bordered": True, "is_striped": True, "is_compact": True}
+
+
+def r_foot(text):
+    return {"type": "footer", "text": text}
+
+
+POS_HEAD = ["Acc", "Position", "Phí", "PnL %", "PnL USDT"]
+POS_ALIGN = [None, None, "right", "right", "right"]
+
+
 
 
 def num(x):
@@ -528,10 +551,6 @@ def num(x):
 
 def dot(x):
     return "🟢" if x >= 0 else "🔴"
-
-
-def kl(x):
-    return "g" if x >= 0 else "r"
 
 
 def side_vn(side):
@@ -585,49 +604,46 @@ async def close_one(c):
 
 
 async def close_all():
-    """-> (ban chu, ban widget HTML)"""
+    """-> (ban chu, blocks cua rich message)"""
     res = await asyncio.gather(*(close_one(c) for c in clients))
     rows = [x for sub in res for x in sub]
     if not rows:
         log("Không có position nào đang mở")
         return ("🛑 Không có position nào đang mở",
-                W_CSS + '<div class="h"><span>🛑 Market close</span></div><div class="m">Không có position nào đang mở.</div>')
+                [r_head("🛑 Market close"), r_par("Không có position nào đang mở.")])
     done = [x for x in rows if x["ok"]]
     tot = sum(x["pnl"] for x in done)
     fees = [x["fee"] for x in done if x["fee"] is not None]
     est = any(x["est"] for x in done)
     T = [f"🛑 Đã đóng {len(done)}/{len(rows)} position"]
-    H = [W_CSS, f'<div class="h"><span>🛑 Đã đóng {len(done)}/{len(rows)} position</span>']
-    if done:
-        H.append(f'<span class="pill b{kl(tot)}">{tot:+.2f} USDT</span>')
-    H.append("</div>")
+    R, errs = [], []
     for x in rows:
         if not x["ok"]:
             T.append(f"❌ {x['acc']}: {x['symbol']} lỗi: {x['err']}")
-            H.append(f'<div class="c"><div class="t">{esc(x["acc"])} · {esc(x["symbol"])}</div>'
-                     f'<div class="r">Lỗi: {esc(x["err"])}</div></div>')
+            errs.append(f"❌ {x['acc']} {x['symbol']}: {x['err']}")
             log(T[-1])
             continue
         px = f"{num(x['entry'])} → {num(x['exit'])}" if x["exit"] else f"entry {num(x['entry'])}"
-        fee = f"{x['fee']:.4f} USDT" if x["fee"] is not None else "chưa có số liệu"
+        fee = f"{x['fee']:.4f}" if x["fee"] is not None else "—"
         tag = " (ước tính)" if x["est"] else ""
         T.append(f"{x['acc']} · {side_vn(x['side'])} {x['symbol']} x{x['lev']}\n"
                  f"   Size {x['size']} | {px}\n"
-                 f"   Phí {fee} | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
-        H.append(f'<div class="c"><div class="row"><span class="t">{esc(x["acc"])} · {side_vn(x["side"])} '
-                 f'{esc(x["symbol"])} <span class="m">x{esc(str(x["lev"]))}</span></span>'
-                 f'<span class="n {kl(x["pnl"])}">{x["pct"]:+.2f}%</span></div>'
-                 f'<div class="row"><span class="m">Size {esc(str(x["size"]))} · {esc(px)}</span>'
-                 f'<span class="n {kl(x["pnl"])}">{x["pnl"]:+.4f} USDT</span></div>'
-                 f'<div class="m">Phí đã trả: {fee}{tag}</div></div>')
+                 f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+        R.append([B(x["acc"]), [B(f"{side_vn(x['side'])} {x['symbol']}"), f" x{x['lev']}\nSize {x['size']}\n{px}"],
+                  fee, f"{dot(x['pnl'])} {x['pct']:+.2f}%", B(f"{x['pnl']:+.4f}{'*' if x['est'] else ''}")])
         log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+    blocks = [r_head(f"🛑 Đã đóng {len(done)}/{len(rows)} position")]
     if done:
-        ft = f"{sum(fees):.4f} USDT" if fees else "chưa có số liệu"
-        note = "PnL ước tính theo giá lúc đóng, chưa trừ phí" if est else "PnL đã trừ phí mở + đóng"
-        T.append(f"Tổng phí {ft} | Tổng PnL {dot(tot)} {tot:+.4f} USDT\n({note})")
-        H.append(f'<div class="f row"><span class="m">Tổng phí {ft}</span>'
-                 f'<span class="n {kl(tot)}">{tot:+.4f} USDT</span></div><div class="m">{note}</div>')
-    return "\n".join(T), "".join(H)
+        ft = f"{sum(fees):.4f}" if fees else "—"
+        note = ("* PnL ước tính theo giá lúc đóng, chưa trừ phí (Bybit chưa trả số liệu)" if est
+                else "PnL đã trừ phí mở + đóng. Đơn vị: USDT.")
+        T.append(f"Tổng phí {ft} USDT | Tổng PnL {dot(tot)} {tot:+.4f} USDT\n({note})")
+        R.append([B("Tổng"), "", B(ft), dot(tot), B(f"{tot:+.4f}")])
+        blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
+        blocks.append(r_foot(note))
+    for e in errs:
+        blocks.append(r_par(e))
+    return "\n".join(T), blocks
 
 
 def status_text():
@@ -652,37 +668,34 @@ def status_text():
     return "\n".join(lines)
 
 
-def status_html(title=None):
+def status_blocks(title=None):
     run = cfg["running"]
-    H = [W_CSS, f'<div class="h"><span>{esc(title or "📊 Trạng thái")}</span>'
-                f'<span class="pill {"bg" if run else "br"}">{"ĐANG CHẠY" if run else "ĐANG DỪNG"}</span></div>',
-         f'<div class="m" style="margin-bottom:6px">{"Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"}'
-         f' · Đòn bẩy all-in: {esc(lev_label())}</div>']
-    tot, has = 0.0, False
+    blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}"),
+              r_par(["Chế độ: ", B("Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"),
+                     " · Đòn bẩy all-in: ", B(lev_label())])]
+    R, tot, has = [], 0.0, False
     for c in clients:
         st = status.get(c.name) or {}
-        bal = f'{st["balance"]:.2f} USDT' if st.get("balance") is not None else ""
         if st.get("error"):
-            H.append(f'<div class="c"><div class="t">{esc(c.name)}</div><div class="r">⚠ {esc(st["error"])}</div></div>')
+            R.append([B(c.name), f"⚠️ {st['error']}", "", "", ""])
         elif not st.get("positions"):
-            H.append(f'<div class="c row"><span><span class="t">{esc(c.name)}</span> '
-                     f'<span class="m">không có position</span></span><span class="m">{bal}</span></div>')
+            bal = f"Không có position\nKhả dụng {st['balance']:.2f} USDT" if st.get("balance") is not None else "Không có position"
+            R.append([B(c.name), bal, "", "", ""])
         else:
             for p in st["positions"]:
                 has = True
                 tot += p["pnl"]
-                H.append(f'<div class="c"><div class="row"><span class="t">{esc(c.name)} · {side_vn(p["side"])} '
-                         f'{esc(p["symbol"])} <span class="m">x{esc(str(p["lev"]))}</span></span>'
-                         f'<span class="n {kl(p["pnl"])}">{p["pct"]:+.2f}%</span></div>'
-                         f'<div class="row"><span class="m">Size {esc(str(p["size"]))} · entry {num(p["avg"])}'
-                         f' · phí {p.get("fee", 0):.4f}</span>'
-                         f'<span class="n {kl(p["pnl"])}">{p["pnl"]:+.4f} USDT</span></div></div>')
-    if not clients:
-        H.append('<div class="c m">Chưa cài sub account nào.</div>')
+                R.append([B(c.name), [B(f"{side_vn(p['side'])} {p['symbol']}"),
+                                      f" x{p['lev']}\nSize {p['size']}\nEntry {num(p['avg'])}"],
+                          f"{p.get('fee', 0):.4f}", f"{dot(p['pnl'])} {p['pct']:+.2f}%", B(f"{p['pnl']:+.4f}")])
     if has:
-        H.append(f'<div class="f row"><span class="m">Tổng PnL đang mở</span>'
-                 f'<span class="n {kl(tot)}">{tot:+.4f} USDT</span></div>')
-    return "".join(H)
+        R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.4f}")])
+    if R:
+        blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
+        blocks.append(r_foot("Phí = phí đã trả của position đang mở. Đơn vị: USDT."))
+    else:
+        blocks.append(r_par("Chưa cài sub account nào."))
+    return blocks
 
 
 async def status_loop():
@@ -848,9 +861,9 @@ HELP_ITEMS = [
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
 
 
-def help_html():
-    return (W_CSS + '<div class="h"><span>📖 Các lệnh</span></div>'
-            + "".join(f'<div class="c"><code>{esc(c)}</code><div class="m">{esc(d)}</div></div>' for c, d in HELP_ITEMS))
+def help_blocks():
+    return [r_head("📖 Các lệnh"),
+            r_table(["Lệnh", "Tác dụng"], [[K(c), d] for c, d in HELP_ITEMS])]
 
 
 BUY_RE = re.compile(r"^/buy(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
@@ -901,26 +914,26 @@ async def _send(chat, text):
     log(f"⚠️ Bot không gửi được tin trả lời: {desc}")
 
 
-async def _send_rich(chat, text, doc):
-    """Thu gui dang widget; khong duoc thi gui ban chu."""
-    if cfg.get("widgets", True) and botst.get("widget") is not False:
+async def _send_rich(chat, text, blocks):
+    """Thu gui Rich Message; khong duoc thi gui ban chu."""
+    if cfg.get("widgets", True) and botst.get("rich") is not False:
         for _ in range(3):
-            r = await bot_api("sendWidget", _quiet=True, chat_id=chat, html=doc, caption=text[:1000], width=340)
+            r = await bot_api("sendRichMessage", _quiet=True, chat_id=chat, rich_message={"blocks": blocks})
             if r.get("ok"):
-                botst["widget"] = True
+                botst["rich"] = True
                 return
             desc = str(r.get("description"))
             if "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
                 continue               # loi mang -> thu lai
             if "not found" in desc.lower() or "404" in desc:
-                botst["widget"] = False   # Bot API chua co sendWidget -> thoi khong thu nua
-            log(f"Widget Telegram chưa dùng được ({desc[:80]}) — gửi bản chữ thay thế")
+                botst["rich"] = False     # Bot API chua co sendRichMessage -> thoi khong thu nua
+            log(f"Rich message bị Telegram từ chối ({desc[:120]}) — gửi bản chữ thay thế")
             break
     await _send(chat, text)
 
 
-def send_rich(chat, text, doc):
-    asyncio.create_task(_send_rich(chat, text, doc))
+def send_rich(chat, text, blocks):
+    asyncio.create_task(_send_rich(chat, text, blocks))
 
 
 def send(chat, text):
@@ -1004,19 +1017,19 @@ async def handle_update(u):
                 return
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
-                send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_html("▶️ Bot đã chạy"))
+                send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_blocks("▶️ Bot đã chạy"))
                 return
             elif cmd == "/stop":
                 cfg["running"] = False; save_cfg(); log("⏸ Stop (từ Telegram)")
                 send_rich(chat, "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)\n" + status_text(),
-                          status_html("⏸ Bot đã dừng"))
+                          status_blocks("⏸ Bot đã dừng"))
                 return
             elif cmd == "/close":
                 log("🛑 Close all (từ Telegram)")
                 send_rich(chat, *(await close_all()))
                 return
             elif cmd == "/status":
-                send_rich(chat, status_text(), status_html())
+                send_rich(chat, status_text(), status_blocks())
                 return
             elif cmd == "/lev":
                 arg = (m.get("text") or "").split()[1:2]
@@ -1056,7 +1069,7 @@ async def handle_update(u):
                     await execute_order(b["coin"], b["size"], b["tp"], b["sl"], "/buy")
                     return   # ket qua da duoc gui qua notify()
             else:
-                send_rich(chat, HELP_TEXT, help_html())
+                send_rich(chat, HELP_TEXT, help_blocks())
                 return
             send(chat, reply)
 
@@ -1104,7 +1117,7 @@ async def h_save_cfg(req):
     cfg["accounts"] = accs
     if "widgets" in d:
         cfg["widgets"] = str(d["widgets"]) != "0"
-        botst.pop("widget", None)
+        botst.pop("rich", None)
     if "allin_lev" in d:
         v = str(d["allin_lev"]).strip().lower().lstrip("x").replace(",", ".")
         cfg["allin_lev"] = v
@@ -1329,7 +1342,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
-    <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Widget có màu (Telegram bản mới)</option><option value="0">Chữ thường</option></select>
+    <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Rich message (bảng biểu)</option><option value="0">Chữ thường</option></select>
     <label>Đòn bẩy cho /allin (số, hoặc max = max của coin)</label><input id="allin_lev" placeholder="chưa đặt">
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>

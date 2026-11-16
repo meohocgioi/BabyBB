@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -645,15 +645,22 @@ def parse_buy(text):
     return b if b["size"] > 0 else None
 
 
+botst = {"ok": False, "err": "", "last": 0}
+BOT_MAX_AGE = 120      # bo qua lenh bot cu hon 120s (vd gui luc tool dang tat)
+
+
 async def bot_api(method, **params):
     if not cfg["bot_token"]:
         return {}
     url = f"https://api.telegram.org/bot{cfg['bot_token']}/{method}"
     try:
         async with http.post(url, json=params, timeout=aiohttp.ClientTimeout(total=40)) as r:
-            return await r.json()
-    except Exception:
-        return {}
+            j = await r.json()
+    except Exception as e:
+        j = {"ok": False, "description": f"{type(e).__name__}: {str(e)[:100]}"}
+    if not j.get("ok") and method != "getUpdates":
+        log(f"⚠️ Bot Telegram {method} lỗi: {j.get('description')}")
+    return j
 
 
 async def notify(text):
@@ -662,46 +669,63 @@ async def notify(text):
 
 
 async def bot_loop():
-    offset, token = None, None
+    offset = None
     while True:
-        if not cfg["bot_token"]:
+        try:
+            if not cfg["bot_token"]:
+                botst.update(ok=False, err="")
+                await asyncio.sleep(3)
+                continue
+            p = {"timeout": 25, "allowed_updates": ["message", "channel_post"]}
+            if offset:
+                p["offset"] = offset
+            r = await bot_api("getUpdates", **p)
+            if not r.get("ok"):
+                err = str(r.get("description") or "không kết nối được Telegram")
+                if err != botst["err"]:
+                    log(f"⚠️ Bot Telegram không nhận được lệnh: {err}")
+                botst.update(ok=False, err=err)
+                await asyncio.sleep(3)
+                continue
+            if not botst["ok"]:
+                log("🤖 Bot Telegram đã kết nối, sẵn sàng nhận lệnh")
+            botst.update(ok=True, err="", last=time.time())
+            for u in r["result"]:
+                offset = u["update_id"] + 1
+                try:
+                    await handle_update(u)
+                except Exception as e:
+                    log(f"⚠️ Lỗi xử lý lệnh bot: {type(e).__name__}: {e}")
+        except Exception as e:
+            log(f"⚠️ bot loop: {type(e).__name__}: {e}")
             await asyncio.sleep(3)
-            continue
-        if token != cfg["bot_token"]:      # token moi -> bo het lenh ton dong cu
-            token = cfg["bot_token"]
-            r = await bot_api("getUpdates", offset=-1, timeout=0)
-            ups = r.get("result") or []
-            offset = ups[-1]["update_id"] + 1 if ups else None
-        p = {"timeout": 25, "allowed_updates": ["message", "channel_post"]}
-        if offset:
-            p["offset"] = offset
-        r = await bot_api("getUpdates", **p)
-        if not r.get("ok"):
-            await asyncio.sleep(3)
-            continue
-        for u in r["result"]:
-            offset = u["update_id"] + 1
+
+
+async def handle_update(u):
+    if True:
+        if True:
             cp = u.get("channel_post")
             if cp:   # bot la admin cua kenh phat lenh -> nghe truc tiep, khong can dang nhap
                 ch = cp.get("chat") or {}
                 num, uname = chan_norm()
                 if (num and ch.get("id") == num) or (uname and (ch.get("username") or "").lower() == uname):
-                    try:
-                        await handle_channel_text(cp["message_id"], cp.get("text") or "",
-                                                  time.time() - cp.get("date", time.time()), "kênh-bot", time.time())
-                    except Exception as e:
-                        log(f"Lỗi xử lý channel_post: {e}")
-                continue
+                    await handle_channel_text(cp["message_id"], cp.get("text") or "",
+                                              time.time() - cp.get("date", time.time()), "kênh-bot", time.time())
+                return
             m = u.get("message") or {}
             chat = str((m.get("chat") or {}).get("id", ""))
             cmd = (m.get("text") or "").strip().split()[0:1]
             cmd = cmd[0].split("@")[0].lower() if cmd else ""
             if not chat:
-                continue
+                return
+            age = time.time() - m.get("date", time.time())
+            if age > BOT_MAX_AGE:
+                log(f"Bỏ qua lệnh bot cũ ({age:.0f}s): {(m.get('text') or '')[:40]}")
+                return
             if chat != str(cfg["bot_owner_id"]).strip():
                 await bot_api("sendMessage", chat_id=chat,
                               text=f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
-                continue
+                return
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
                 reply = "▶️ Bot ĐÃ CHẠY\n" + status_text()
@@ -740,7 +764,7 @@ async def bot_loop():
                 else:
                     log(f"🛒 /allin {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
-                    continue
+                    return
             elif cmd == "/buy":
                 b = parse_buy(m.get("text") or "")
                 if not b:
@@ -749,7 +773,7 @@ async def bot_loop():
                 else:
                     log(f"🛒 /buy {b['coin']} {b['size']:g} {b['tp']:g} {b['sl']:g} (từ Telegram)")
                     await execute_order(b["coin"], b["size"], b["tp"], b["sl"], "/buy")
-                    continue   # ket qua da duoc gui qua notify()
+                    return   # ket qua da duoc gui qua notify()
             else:
                 reply = HELP_TEXT
             await bot_api("sendMessage", chat_id=chat, text=reply[:4000])
@@ -778,7 +802,7 @@ async def h_state(req):
                      "positions": st.get("positions", []), "error": st.get("error", "")})
     return web.json_response({"version": VERSION, "running": cfg["running"], "mode": cfg["mode"],
                               "accounts": accs, "logs": list(logs)[:120], "listen": listen,
-                              "channel": cfg["channel_id"], "bot": bool(cfg["bot_token"])})
+                              "channel": cfg["channel_id"], "bot": bool(cfg["bot_token"]), "botst": botst})
 
 
 async def h_get_cfg(req):
@@ -1041,7 +1065,7 @@ async function update(){const j=await post('/api/update');if(j&&j.restart)setTim
 function lst(s){const l=s.listen;if(l.mode=='web')return l.ok?'✅ đang đọc kênh công khai':'⚠ '+(l.err||'đang kết nối…');if(l.mode=='bot')return s.bot?'qua bot (bot của bạn phải là admin kênh)':'⚠ ID dạng số cần bot của bạn làm admin kênh — hoặc nhập @tenkenh nếu kênh công khai';return '⚠ chưa nhập Channel ID'}
 async function refresh(){try{const s=await(await fetch('/api/state')).json();
   $('run').textContent=s.running?'ĐANG CHẠY':'ĐANG DỪNG';$('run').className='pill '+(s.running?'on':'off');
-  $('tgst').textContent=$('tgst2').textContent=lst(s);$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=s.bot?'đã cài':'chưa cài';
+  $('tgst').textContent=$('tgst2').textContent=lst(s);$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=!s.bot?'chưa cài':(s.botst.ok?'✅ đang kết nối':'⚠ '+(s.botst.err||'đang kết nối…'));
   $('status').innerHTML=s.accounts.length?s.accounts.map(a=>{let body;
     if(a.error)body=`<span class="neg">⚠ ${esc(a.error)}</span>`;
     else if(!a.positions.length)body='<span class="mut">không có position</span>';

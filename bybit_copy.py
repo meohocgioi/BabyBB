@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -645,7 +645,7 @@ def parse_buy(text):
     return b if b["size"] > 0 else None
 
 
-botst = {"ok": False, "err": "", "last": 0}
+botst = {"ok": False, "err": "", "last": 0, "name": "", "token": ""}
 BOT_MAX_AGE = 120      # bo qua lenh bot cu hon 120s (vd gui luc tool dang tat)
 
 
@@ -687,8 +687,11 @@ async def bot_loop():
                 botst.update(ok=False, err=err)
                 await asyncio.sleep(3)
                 continue
-            if not botst["ok"]:
-                log("🤖 Bot Telegram đã kết nối, sẵn sàng nhận lệnh")
+            if not botst["ok"] or botst["token"] != cfg["bot_token"]:
+                me = await bot_api("getMe")
+                botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")
+                botst["token"] = cfg["bot_token"]
+                log(f"🤖 Bot Telegram đã kết nối: {botst['name']} — hãy nhắn lệnh cho đúng bot này")
             botst.update(ok=True, err="", last=time.time())
             for u in r["result"]:
                 offset = u["update_id"] + 1
@@ -714,6 +717,7 @@ async def handle_update(u):
                 return
             m = u.get("message") or {}
             chat = str((m.get("chat") or {}).get("id", ""))
+            log(f"📩 Bot nhận: {(m.get('text') or '(không phải tin chữ)')[:40]} (chat {chat or '?'})")
             cmd = (m.get("text") or "").strip().split()[0:1]
             cmd = cmd[0].split("@")[0].lower() if cmd else ""
             if not chat:
@@ -834,8 +838,13 @@ async def h_save_cfg(req):
             cfg[k] = max(0.0, float(d[k]))
         except Exception:
             pass
-    if (d.get("bot_token") or "").strip():
-        cfg["bot_token"] = d["bot_token"].strip()
+    new_token = (d.get("bot_token") or "").strip()
+    if new_token and new_token != cfg["bot_token"]:
+        if re.fullmatch(r"\d+:[\w-]{30,}", new_token):
+            cfg["bot_token"] = new_token
+            log("🔑 Bot Token đã được thay bằng token mới")
+        else:
+            log("⚠️ Bỏ qua Bot Token vừa nhập vì không đúng dạng token của BotFather — vẫn giữ token cũ")
     save_cfg()
     rebuild_clients()
     instruments.clear()
@@ -972,6 +981,7 @@ h2{font-size:14px;margin:0 0 10px;color:var(--yl);text-transform:uppercase;lette
 button{border:0;border-radius:7px;padding:8px 14px;font:600 13px inherit;cursor:pointer;color:#fff;background:#2c3440}
 button:hover{filter:brightness(1.15)}.b-gr{background:var(--gr);color:#04261b}.b-rd{background:var(--rd)}.b-yl{background:var(--yl);color:#231800}.b-bl{background:var(--bl)}
 textarea{resize:vertical;font:12px/1.6 Consolas,monospace !important;white-space:pre;overflow-x:auto}
+.secret{-webkit-text-security:disc}
 input,select,textarea{width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px;color:var(--tx);padding:7px 9px;font:13px inherit}
 label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 .row{display:flex;gap:8px;align-items:end}.row>*{flex:1}.row>button{flex:0 0 auto}
@@ -1033,7 +1043,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   </div>
 
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
-    <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="password">
+    <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
     <label>Đòn bẩy cho /allin (số, hoặc max = max của coin)</label><input id="allin_lev" placeholder="chưa đặt">
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
@@ -1065,7 +1075,7 @@ async function update(){const j=await post('/api/update');if(j&&j.restart)setTim
 function lst(s){const l=s.listen;if(l.mode=='web')return l.ok?'✅ đang đọc kênh công khai':'⚠ '+(l.err||'đang kết nối…');if(l.mode=='bot')return s.bot?'qua bot (bot của bạn phải là admin kênh)':'⚠ ID dạng số cần bot của bạn làm admin kênh — hoặc nhập @tenkenh nếu kênh công khai';return '⚠ chưa nhập Channel ID'}
 async function refresh(){try{const s=await(await fetch('/api/state')).json();
   $('run').textContent=s.running?'ĐANG CHẠY':'ĐANG DỪNG';$('run').className='pill '+(s.running?'on':'off');
-  $('tgst').textContent=$('tgst2').textContent=lst(s);$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=!s.bot?'chưa cài':(s.botst.ok?'✅ đang kết nối':'⚠ '+(s.botst.err||'đang kết nối…'));
+  $('tgst').textContent=$('tgst2').textContent=lst(s);$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=!s.bot?'chưa cài':(s.botst.ok?'✅ '+s.botst.name:'⚠ '+(s.botst.err||'đang kết nối…'));
   $('status').innerHTML=s.accounts.length?s.accounts.map(a=>{let body;
     if(a.error)body=`<span class="neg">⚠ ${esc(a.error)}</span>`;
     else if(!a.positions.length)body='<span class="mut">không có position</span>';

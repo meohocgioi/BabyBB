@@ -25,7 +25,8 @@ Chỉ cần nhập **Channel ID** → **Lưu cài đặt**. Tool không đăng n
 ## 4. Bot điều khiển từ xa
 1. Nhắn @BotFather → `/newbot` → lấy **Bot Token**, dán vào tool → Lưu.
 2. Nhắn bất kỳ cho bot của bạn → bot trả về **Chat ID** → dán vào ô "Chat ID chủ bot" → Lưu.
-3. Lệnh: `/start` chạy · `/stop` dừng · `/close` market close tất cả · `/status` xem PnL.
+3. Lệnh: `/start` chạy · `/stop` dừng · `/status` xem PnL · `/close` market close tất cả · `/help` xem danh sách lệnh.
+4. Mở lệnh tay: `/buy #coin size tp sl` — ví dụ `/buy #eth 1000 10 2` = Long ETHUSDT 1000 USDT, TP +10%, SL −2% so với giá entry. Lệnh này chạy cả khi bot đang dừng.
 
 Bot cũng tự báo về Telegram mỗi khi tool vào lệnh.
 

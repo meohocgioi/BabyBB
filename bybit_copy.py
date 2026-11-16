@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -363,6 +363,13 @@ async def execute_signal(text, source="telegram", t0=None):
         log(f"Bỏ qua '{text.strip()}': {plan[1]}")
         return plan[1]
     notional, tp, sl = plan
+    return await execute_order(cmd["coin"], notional, tp, sl, source, t0)
+
+
+async def execute_order(coin, notional, tp, sl, source, t0=None):
+    """Mo Long coin voi gia tri position = notional USDT tren tat ca sub account."""
+    t0 = t0 or time.time()
+    cmd = {"coin": coin.upper()}
     if not clients:
         log("Có lệnh nhưng chưa cài sub account nào")
         return "Chưa có sub account"
@@ -547,6 +554,30 @@ async def web_listen_loop():
 # ----------------------------------------------------------------------------
 # Telegram: bot dieu khien (Bot API)
 # ----------------------------------------------------------------------------
+HELP_TEXT = (
+    "📖 Các lệnh:\n"
+    "/start — chạy bot (nghe lệnh từ kênh)\n"
+    "/stop — dừng bot (position đang mở giữ nguyên)\n"
+    "/status — xem position và PnL từng acc\n"
+    "/buy #coin size tp sl — mở Long ngay trên tất cả acc\n"
+    "      size = USDT, tp/sl = % so với giá entry\n"
+    "      vd: /buy #eth 1000 10 2\n"
+    "/close — market close toàn bộ position\n"
+    "/help — hiện danh sách lệnh này"
+)
+
+BUY_RE = re.compile(r"^/buy(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
+
+
+def parse_buy(text):
+    m = BUY_RE.match((text or "").strip())
+    if not m:
+        return None
+    f = lambda x: float(x.replace(",", "."))
+    b = {"coin": m.group(1).upper(), "size": f(m.group(2)), "tp": f(m.group(3)), "sl": f(m.group(4))}
+    return b if b["size"] > 0 else None
+
+
 async def bot_api(method, **params):
     if not cfg["bot_token"]:
         return {}
@@ -615,8 +646,17 @@ async def bot_loop():
                 reply = "🛑 Market close tất cả:\n" + await close_all()
             elif cmd == "/status":
                 reply = status_text()
+            elif cmd == "/buy":
+                b = parse_buy(m.get("text") or "")
+                if not b:
+                    reply = ("Sai cú pháp. Dùng: /buy #coin size tp sl\n"
+                             "Ví dụ: /buy #eth 1000 10 2 → Long ETHUSDT 1000 USDT, TP +10%, SL -2%")
+                else:
+                    log(f"🛒 /buy {b['coin']} {b['size']:g} {b['tp']:g} {b['sl']:g} (từ Telegram)")
+                    await execute_order(b["coin"], b["size"], b["tp"], b["sl"], "/buy")
+                    continue   # ket qua da duoc gui qua notify()
             else:
-                reply = "/start chạy bot\n/stop dừng bot\n/close đóng tất cả position\n/status xem trạng thái"
+                reply = HELP_TEXT
             await bot_api("sendMessage", chat_id=chat, text=reply[:4000])
 
 
@@ -871,7 +911,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="password">
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
-    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /start · /stop · /close · /status</div>
+    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 
   <div class="card"><h2>Update</h2>

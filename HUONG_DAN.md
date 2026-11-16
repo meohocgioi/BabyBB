@@ -27,6 +27,7 @@ Chỉ cần nhập **Channel ID** → **Lưu cài đặt**. Tool không đăng n
 2. Nhắn bất kỳ cho bot của bạn → bot trả về **Chat ID** → dán vào ô "Chat ID chủ bot" → Lưu.
 3. Lệnh: `/start` chạy · `/stop` dừng · `/status` xem PnL · `/close` market close tất cả · `/help` xem danh sách lệnh.
 4. Mở lệnh tay: `/buy #coin size tp sl` — ví dụ `/buy #eth 1000 10 2` = Long ETHUSDT 1000 USDT, TP +10%, SL −2% so với giá entry. Lệnh này chạy cả khi bot đang dừng.
+5. All-in: `/lev 10` đặt đòn bẩy all-in (hoặc `/lev max` = max của coin), rồi `/allin #coin tp sl` — ví dụ `/allin #evaa 10 2`. Mỗi acc mở Long bằng toàn bộ vốn khả dụng × đòn bẩy. Coin chỉ cho đòn bẩy thấp hơn (vd EVAA x4) thì tool tự hạ xuống max của coin. Tool chừa khoảng 3% vốn + phí để lệnh không bị từ chối.
 
 Bot cũng tự báo về Telegram mỗi khi tool vào lệnh.
 

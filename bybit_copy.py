@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,6 +37,7 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
+    "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
     "update_url": DEFAULT_UPDATE_URL,
@@ -132,6 +133,17 @@ def floor_step(x, step):
 
 def round_tick(x, tick):
     return (D(x) / tick).quantize(Decimal(1), rounding=ROUND_HALF_UP) * tick
+
+
+FEE_RESERVE = 0.0012   # phi mo + du phong phi dong (taker 0.055% x2)
+
+
+def allin_plan(avail, want, maxlev):
+    """All-in: (lev, notional) voi lev = min(want, max cua coin); want = None -> max."""
+    lev = maxlev if want is None else min(float(want), maxlev)
+    lev = max(1.0, lev)
+    lev = int(lev) if lev == int(lev) else lev
+    return lev, avail * 0.97 / (1 / lev + FEE_RESERVE)
 
 
 def calc_leverage(notional, avail, maxlev):
@@ -284,19 +296,30 @@ async def resolve_symbol(coin):
 # ----------------------------------------------------------------------------
 # Vao lenh
 # ----------------------------------------------------------------------------
-async def open_one(c, symbol, notional, tp, sl, price):
+async def open_one(c, symbol, notional, tp, sl, price, allin=None):
+    """allin = None: lenh co size. allin = ("lev", so) hoac ("max",): all-in toan bo so du."""
     ins = instruments[symbol]
     try:
-        avail = (status.get(c.name) or {}).get("balance")
-        if avail is None:
-            avail = await c.balance()
-        lev, real = calc_leverage(notional, avail, ins["maxlev"])
-        if lev is None:
-            return f"❌ {c.name}: số dư = 0"
-        note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev})"
+        if allin:
+            avail = await c.balance()          # all-in: lay so du moi nhat
+            if avail <= 0:
+                return f"❌ {c.name}: số dư = 0"
+            want = allin[1] if allin[0] == "lev" else None
+            lev, real = allin_plan(avail, want, ins["maxlev"])
+            note = f" | ALL-IN vốn {avail:.2f} USDT"
+            if want and lev < want:
+                note += f" (coin chỉ cho tối đa x{lev:g})"
+        else:
+            avail = (status.get(c.name) or {}).get("balance")
+            if avail is None:
+                avail = await c.balance()
+            lev, real = calc_leverage(notional, avail, ins["maxlev"])
+            if lev is None:
+                return f"❌ {c.name}: số dư = 0"
+            note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev})"
         r = await c.req("POST", "/v5/position/set-leverage",
                         {"category": "linear", "symbol": symbol,
-                         "buyLeverage": str(lev), "sellLeverage": str(lev)})
+                         "buyLeverage": f"{lev:g}", "sellLeverage": f"{lev:g}"})
         if r.get("retCode") not in (0, 110043):
             return f"❌ {c.name}: đặt đòn bẩy x{lev} lỗi: {r.get('retMsg')}"
         qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
@@ -315,13 +338,18 @@ async def open_one(c, symbol, notional, tp, sl, price):
         if r.get("retCode") != 0 and "position idx" in str(r.get("retMsg", "")).lower():
             order["positionIdx"] = 1   # tai khoan dang o hedge mode
             r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
+        if r.get("retCode") != 0 and allin and "insufficient" in str(r.get("retMsg", "")).lower():
+            real *= 0.9                # thieu ky quy -> thu lai voi 90% size
+            qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
+            order["qty"] = fmt(qty)
+            r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
         if r.get("retCode") != 0 and tpsl:
             # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
             r = await c.req("POST", "/v5/order/create", order)
         if r.get("retCode") != 0:
             return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"]))
-        return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{real:.0f} USDT, x{lev}){note}"
+        return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{real:.0f} USDT, x{lev:g}){note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
 
@@ -366,7 +394,7 @@ async def execute_signal(text, source="telegram", t0=None):
     return await execute_order(cmd["coin"], notional, tp, sl, source, t0)
 
 
-async def execute_order(coin, notional, tp, sl, source, t0=None):
+async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
     """Mo Long coin voi gia tri position = notional USDT tren tat ca sub account."""
     t0 = t0 or time.time()
     cmd = {"coin": coin.upper()}
@@ -386,9 +414,16 @@ async def execute_order(coin, notional, tp, sl, source, t0=None):
         msg = f"❌ Không lấy được giá {symbol}: {r.get('retMsg')}"
         log(msg); asyncio.create_task(notify(msg))
         return msg
-    res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price) for c in clients))
+    res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin) for c in clients))
     ms = int((time.time() - t0) * 1000)
-    head = f"📥 [{source}] Long {symbol} | size {notional:.0f} USDT | TP +{tp}% | SL -{sl}% | {ms}ms"
+    if allin:
+        mx = instruments[symbol]["maxlev"]
+        lv = mx if allin[0] == "max" else min(allin[1], mx)
+        head = f"📥 [{source}] ALL-IN Long {symbol} | đòn bẩy x{lv:g} (coin max x{mx:g}) | TP +{tp:g}% | SL -{sl:g}% | {ms}ms"
+        if sl and sl >= 90 / lv:
+            head += f"\n⚠️ SL -{sl:g}% xa hơn mức thanh lý ước tính (~-{100 / lv:.1f}%) — có thể bị thanh lý trước khi chạm SL"
+    else:
+        head = f"📥 [{source}] Long {symbol} | size {notional:.0f} USDT | TP +{tp:g}% | SL -{sl:g}% | {ms}ms"
     log(head)
     for line in res:
         log(line)
@@ -423,7 +458,7 @@ async def close_all():
 
 def status_text():
     lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
-             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'}"]
+             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy all-in: {lev_label()}"]
     for c in clients:
         st = status.get(c.name) or {}
         if st.get("error"):
@@ -554,6 +589,34 @@ async def web_listen_loop():
 # ----------------------------------------------------------------------------
 # Telegram: bot dieu khien (Bot API)
 # ----------------------------------------------------------------------------
+def allin_setting():
+    """cfg['allin_lev'] -> None (chua dat) | ("max",) | ("lev", so)."""
+    v = str(cfg.get("allin_lev") or "").strip().lower()
+    if v == "max":
+        return ("max",)
+    try:
+        f = float(v)
+        return ("lev", f) if 1 <= f <= 200 else None
+    except ValueError:
+        return None
+
+
+def lev_label():
+    a = allin_setting()
+    return "chưa đặt" if not a else ("max của coin" if a[0] == "max" else f"x{a[1]:g}")
+
+
+ALLIN_RE = re.compile(r"^/allin(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
+
+
+def parse_allin(text):
+    m = ALLIN_RE.match((text or "").strip())
+    if not m:
+        return None
+    f = lambda x: float(x.replace(",", "."))
+    return {"coin": m.group(1).upper(), "tp": f(m.group(2)), "sl": f(m.group(3))}
+
+
 HELP_TEXT = (
     "📖 Các lệnh:\n"
     "/start — chạy bot (nghe lệnh từ kênh)\n"
@@ -562,6 +625,10 @@ HELP_TEXT = (
     "/buy #coin size tp sl — mở Long ngay trên tất cả acc\n"
     "      size = USDT, tp/sl = % so với giá entry\n"
     "      vd: /buy #eth 1000 10 2\n"
+    "/lev N — đặt đòn bẩy cho /allin (vd /lev 10; /lev max = max của coin)\n"
+    "/allin #coin tp sl — all-in toàn bộ vốn mỗi acc với đòn bẩy /lev\n"
+    "      coin không cho tới mức đó thì tự hạ xuống max của coin\n"
+    "      vd: /allin #evaa 10 2\n"
     "/close — market close toàn bộ position\n"
     "/help — hiện danh sách lệnh này"
 )
@@ -646,6 +713,34 @@ async def bot_loop():
                 reply = "🛑 Market close tất cả:\n" + await close_all()
             elif cmd == "/status":
                 reply = status_text()
+            elif cmd == "/lev":
+                arg = (m.get("text") or "").split()[1:2]
+                arg = arg[0].lower().lstrip("x").replace(",", ".") if arg else ""
+                ok = arg == "max"
+                if not ok:
+                    try:
+                        ok = 1 <= float(arg) <= 200
+                    except ValueError:
+                        ok = False
+                if ok:
+                    cfg["allin_lev"] = arg; save_cfg()
+                    log(f"⚙️ Đòn bẩy all-in: {lev_label()} (từ Telegram)")
+                    reply = (f"⚙️ Đã đặt đòn bẩy all-in: {lev_label()} cho tất cả sub account.\n"
+                             "Áp dụng khi dùng /allin. Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó.")
+                else:
+                    reply = f"Đòn bẩy all-in hiện tại: {lev_label()}\nDùng: /lev 10 (từ 1 đến 200) hoặc /lev max"
+            elif cmd == "/allin":
+                a = parse_allin(m.get("text") or "")
+                st = allin_setting()
+                if not a:
+                    reply = ("Sai cú pháp. Dùng: /allin #coin tp sl\n"
+                             "Ví dụ: /allin #evaa 10 2 → all-in Long EVAAUSDT, TP +10%, SL -2%")
+                elif not st:
+                    reply = "Chưa đặt đòn bẩy all-in. Gõ /lev 10 (hoặc /lev max để dùng max của coin) rồi gửi lại /allin."
+                else:
+                    log(f"🛒 /allin {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
+                    await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
+                    continue
             elif cmd == "/buy":
                 b = parse_buy(m.get("text") or "")
                 if not b:
@@ -701,6 +796,11 @@ async def h_save_cfg(req):
         secret = (a.get("secret") or "").strip() or old.get(key, "")
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
+    if "allin_lev" in d:
+        v = str(d["allin_lev"]).strip().lower().lstrip("x").replace(",", ".")
+        cfg["allin_lev"] = v
+        if not allin_setting():
+            cfg["allin_lev"] = ""
     for k in ("env", "mode", "bot_owner_id", "update_url",
               "channel_id"):
         if k in d:
@@ -911,7 +1011,8 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="password">
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
-    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
+    <label>Đòn bẩy cho /allin (số, hoặc max = max của coin)</label><input id="allin_lev" placeholder="chưa đặt">
+    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 
   <div class="card"><h2>Update</h2>
@@ -927,13 +1028,13 @@ async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Cont
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('m-custom').classList.toggle('sel',m=='custom');$('box-follow').style.display=m=='follow'?'':'none';$('box-custom').style.display=m=='custom'?'flex':'none'}
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id'])$(k).value=cfg[k]??'';
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id','allin_lev'])$(k).value=cfg[k]??'';
   $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
   const o={accounts,mode};
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id'])o[k]=$(k).value;return o}
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
 async function update(){const j=await post('/api/update');if(j&&j.restart)setTimeout(()=>location.reload(),5000)}

@@ -1,0 +1,5 @@
+config.json
+config.json.tmp
+tg_session*
+*.bak
+__pycache__/

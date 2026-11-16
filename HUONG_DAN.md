@@ -1,9 +1,10 @@
 # Bybit Multi-Sub Copy — Hướng dẫn cài đặt
 
 ## 1. Chạy tool
-1. Cài Python từ https://www.python.org/downloads/ (tick **Add python.exe to PATH**).
-2. Để `bybit_copy.py` và `start.bat` chung một thư mục.
-3. Bấm đúp `start.bat`. Trình duyệt tự mở http://127.0.0.1:8787. Giữ cửa sổ đen mở trong lúc dùng.
+Chỉ cần **một file**: `BabyBB.bat`. Tải về, để ở Desktop, bấm đúp để chạy.
+- Lần đầu file tự tải tool, tự cài thư viện (và thử tự cài Python nếu máy chưa có).
+- Trình duyệt tự mở http://127.0.0.1:8787. Giữ cửa sổ đen mở trong lúc dùng; đóng cửa sổ đen = tắt tool.
+- Mọi thứ khác (code, cài đặt, API key) nằm trong thư mục `C:\Users\<tên bạn>\BabyBB` — bạn không cần đụng vào.
 
 ## 2. Sub account Bybit
 Với **từng** sub account: đăng nhập sub → API Management → tạo API key

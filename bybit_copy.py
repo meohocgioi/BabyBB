@@ -4,7 +4,46 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.5.0"
+VERSION = "1.5.1"
+
+# Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
+CHANGELOG = [
+    ("1.5.1", ["Chỉ cập nhật khi bạn gõ /update (hoặc bấm nút trên tool) — bỏ tự động cập nhật",
+               "/update trả về change log dạng rich message"]),
+    ("1.5.0", ["Lệnh /update qua bot Telegram",
+               "Bản mới được chạy thử trước khi thay; lỗi khi khởi động thì tự quay về bản cũ"]),
+    ("1.4.2", ["Tự đồng bộ lại giờ với Bybit khi bị từ chối vì lệch giờ"]),
+    ("1.4.1", ["/lev áp dụng cho mọi lệnh (/buy, /allin, lệnh kênh)", "Hiện đúng giá trị thật của lệnh sau khi làm tròn"]),
+    ("1.4.0", ["Tin /status tự cập nhật ngay trong tin"]),
+    ("1.3.0", ["Bot trả lời bằng rich message (bảng): /status, /close, /help, /start, /stop"]),
+    ("1.2.0", ["/close báo phí và PnL thực tế từng acc"]),
+    ("1.1.0", ["Vào lệnh nhanh hơn: giá có sẵn, đòn bẩy đặt song song với lệnh"]),
+    ("1.0.9", ["Bot không còn lag khi kết nối tới Telegram bị treo"]),
+    ("1.0.6", ["Lệnh /lev và /allin"]),
+    ("1.0.5", ["Lệnh /help và /buy"]),
+]
+
+
+def ver_key(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0,)
+
+
+def changelog_since(old=None, limit=6):
+    """Cac ban moi hon `old` (old=None -> chi ban hien tai)."""
+    if old is None:
+        return CHANGELOG[:1]
+    return [e for e in CHANGELOG if ver_key(old) < ver_key(e[0]) <= ver_key(VERSION)][:limit] or CHANGELOG[:1]
+
+
+def changelog_msg(title, entries):
+    """-> (ban chu, blocks rich message)"""
+    T = [title] + [f"v{v}\n" + "\n".join(f"  • {c}" for c in ch) for v, ch in entries]
+    blocks = [r_head(title),
+              r_table(["Bản", "Thay đổi"], [[B(f"v{v}"), "\n".join(f"• {c}" for c in ch)] for v, ch in entries])]
+    return "\n".join(T), blocks
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,7 +76,6 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
-    "auto_update": True,            # tu kiem tra GitHub va tu cap nhat
     "update_note": "",              # tin bao se gui qua bot sau khi khoi dong lai
     "live_msg": None,               # [chat, message_id, rich] cua tin /status dang tu cap nhat
     "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
@@ -908,7 +946,7 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
-    ("/update", "Cập nhật tool lên bản mới nhất ngay (tool cũng tự kiểm tra mỗi 5 phút)"),
+    ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
@@ -1104,8 +1142,15 @@ async def bot_loop():
                 botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")
                 botst["token"] = cfg["bot_token"]
                 log(f"🤖 Bot Telegram đã kết nối: {botst['name']} — hãy nhắn lệnh cho đúng bot này")
-                if cfg.get("update_note"):
-                    await notify(cfg["update_note"] + f"\nTool v{VERSION} đang chạy bình thường.")
+                note = cfg.get("update_note")
+                if note and cfg["bot_owner_id"]:
+                    m_old = re.search(r"(\d+(?:\.\d+)+) →", note)
+                    if note.startswith("⬆️") and m_old:
+                        send_rich(cfg["bot_owner_id"],
+                                  *changelog_msg(f"⬆️ Đã cập nhật v{m_old.group(1)} → v{VERSION}",
+                                                 changelog_since(m_old.group(1))))
+                    else:
+                        send(cfg["bot_owner_id"], note)
                     cfg["update_note"] = ""
                     save_cfg()
             botst.update(ok=True, err="", last=time.time())
@@ -1193,7 +1238,10 @@ async def handle_update(u):
             elif cmd == "/update":
                 log("⬆️ /update (từ Telegram)")
                 ok, msg, rs = await do_update("lệnh /update")
-                reply = ("⬆️ " if ok else "⚠️ ") + msg + ("\nBot sẽ báo lại sau vài giây." if rs else "")
+                if ok and not rs:      # dang la ban moi nhat -> gui change log cua ban hien tai
+                    send_rich(chat, *changelog_msg(f"✅ Đang là bản mới nhất — v{VERSION}", changelog_since()))
+                    return
+                reply = ("⬆️ " if ok else "⚠️ ") + msg + ("\nBot sẽ gửi change log sau vài giây." if rs else "")
             elif cmd == "/buy":
                 b = parse_buy(m.get("text") or "")
                 if not b:
@@ -1250,8 +1298,6 @@ async def h_save_cfg(req):
         secret = (a.get("secret") or "").strip() or old.get(key, "")
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
-    if "auto_update" in d:
-        cfg["auto_update"] = str(d["auto_update"]) != "0"
     if "widgets" in d:
         cfg["widgets"] = str(d["widgets"]) != "0"
         botst.pop("rich", None)
@@ -1311,7 +1357,6 @@ async def h_manual(req):
 
 busy = {"n": 0}            # so lenh dang vao/dong -> khong khoi dong lai giua chung
 PENDING = os.path.join(BASE_DIR, "update_pending")   # danh dau "vua update, chua chay on dinh"
-AUTO_CHECK_EVERY = 300     # giay giua 2 lan tu kiem tra ban moi
 
 
 def _api_url(url):
@@ -1399,26 +1444,13 @@ async def h_update(req):
     return web.json_response({"ok": ok, "msg": msg, "restart": rs})
 
 
-async def auto_update_loop():
+async def clear_pending_later():
     await asyncio.sleep(45)
     if os.path.exists(PENDING):        # ban moi da chay on dinh 45s -> xoa dau "cho kiem chung"
         try:
             os.remove(PENDING)
         except Exception:
             pass
-    last_err = ""
-    while True:
-        try:
-            if cfg.get("auto_update", True):
-                ok, msg, rs = await do_update("tự động")
-                if not ok and msg != last_err:
-                    last_err = msg
-                    if "không qua được" in msg or "lỗi code" in msg:
-                        log(f"⚠️ Tự cập nhật: {msg}")
-                        await notify(f"⚠️ Tự cập nhật thất bại: {msg}")
-        except Exception as e:
-            log(f"auto update: {type(e).__name__}: {e}")
-        await asyncio.sleep(AUTO_CHECK_EVERY)
 
 
 def selftest():
@@ -1431,7 +1463,8 @@ def selftest():
     status["Acc1"] = {"balance": 1.0, "error": "", "t": 0, "positions": [
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}
-    json.dumps([status_blocks(stamp="x"), help_blocks()])
+    json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0"))])
+    assert CHANGELOG[0][0] == VERSION, "CHANGELOG thieu ban hien tai"
     assert status_text() and HELP_TEXT and "__VERSION__" in HTML and chan_norm() is not None
     print("selftest ok", VERSION)
 
@@ -1489,7 +1522,7 @@ async def main():
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
     asyncio.create_task(tg_keepalive())
-    asyncio.create_task(auto_update_loop())
+    asyncio.create_task(clear_pending_later())
     asyncio.create_task(live_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
@@ -1582,7 +1615,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 
   <div class="card"><h2>Update</h2>
     <label>Link GitHub raw của file bybit_copy.py</label><input id="update_url" placeholder="https://raw.githubusercontent.com/&lt;user&gt;/&lt;repo&gt;/main/bybit_copy.py">
-    <label>Tự động cập nhật</label><select id="auto_update"><option value="1">Bật — tự kiểm tra mỗi 5 phút và tự cập nhật</option><option value="0">Tắt — chỉ cập nhật khi bấm nút hoặc gõ /update</option></select>
+    <div class="mut" style="font-size:12px;margin-top:6px">Tool chỉ cập nhật khi bạn gõ /update cho bot hoặc bấm nút Update New Ver.</div>
   </div>
   <button class="b-bl" onclick="save()">💾 Lưu cài đặt</button>
 </div>
@@ -1596,11 +1629,11 @@ function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id','allin_lev'])$(k).value=cfg[k]??'';
   $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
-  $('widgets').value=cfg.widgets===false?'0':'1';$('auto_update').value=cfg.auto_update===false?'0':'1';
+  $('widgets').value=cfg.widgets===false?'0':'1';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
-  const o={accounts,mode,widgets:$('widgets').value,auto_update:$('auto_update').value};
+  const o={accounts,mode,widgets:$('widgets').value};
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
@@ -1650,7 +1683,6 @@ if __name__ == "__main__":
                 os.remove(PENDING)
                 load_cfg()
                 cfg["update_note"] = f"⚠️ Bản {VERSION} lỗi khi khởi động ({type(e).__name__}: {str(e)[:80]}) — đã tự quay về bản cũ"
-                cfg["auto_update"] = False     # tranh vong lap update -> loi -> quay ve
                 save_cfg()
                 print("Da quay ve ban cu, dang chay lai...")
                 restart()

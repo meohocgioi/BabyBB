@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 import asyncio, hashlib, hmac, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -17,6 +17,7 @@ from aiohttp import web
 
 try:
     from telethon import TelegramClient, events
+    from telethon import utils as tl_utils
     from telethon.errors import SessionPasswordNeededError
 except Exception:  # telethon chua cai
     TelegramClient = None
@@ -461,28 +462,55 @@ async def status_loop():
 # ----------------------------------------------------------------------------
 # Telegram: nghe kenh (tai khoan ca nhan qua Telethon)
 # ----------------------------------------------------------------------------
-tg = {"client": None, "state": "need_config", "creds": None}
+tg = {"client": None, "state": "need_config", "creds": None, "chan_num": None}
+
+
+def chan_norm():
+    """Channel ID nguoi dung nhap -> (id so dang -100..., username)."""
+    s = str(cfg.get("channel_id") or "").strip()
+    s = re.sub(r"^(https?://)?t\.me/(s/)?", "", s).lstrip("@").strip("/")
+    if re.fullmatch(r"-?\d+", s):
+        return (int(s) if s.startswith("-") else int("-100" + s)), None
+    return None, (s.lower() or None)
+
+
+async def resolve_channel():
+    num, uname = chan_norm()
+    tg["chan_num"], title = num, ""
+    cl = tg["client"]
+    if cl and tg["state"] == "ready" and (num or uname):
+        try:
+            ent = await cl.get_entity(num if num else uname)
+            tg["chan_num"] = tl_utils.get_peer_id(ent)
+            title = getattr(ent, "title", "") or ""
+            log(f"Telegram: dang nghe kenh '{title}' ({tg['chan_num']})")
+        except Exception as e:
+            log(f"⚠️ Telegram: tai khoan chua thay kenh {cfg['channel_id']} — hay tham gia kenh truoc ({str(e)[:80]})")
+    cfg["channel_title"] = title
+    save_cfg()
+
+
+async def handle_channel_text(msg_id, text, age, source, t0):
+    if not parse_command(text):
+        return
+    if msg_id in seen_msgs:
+        return
+    seen_msgs.append(msg_id)
+    if age > SIGNAL_MAX_AGE:
+        log(f"Bo qua lenh cu ({age:.0f}s): {text.strip()}")
+        return
+    if not cfg["running"]:
+        log(f"Bot dang DUNG — bo qua lenh: {text.strip()}")
+        return
+    await execute_signal(text, source, t0)
 
 
 async def on_tg_message(event):
     try:
-        if not cfg["channel_id"] or event.chat_id != int(cfg["channel_id"]):
+        if not tg["chan_num"] or event.chat_id != tg["chan_num"]:
             return
-        t0 = time.time()
-        text = event.raw_text or ""
-        if not parse_command(text):
-            return
-        if event.id in seen_msgs:
-            return
-        seen_msgs.append(event.id)
         age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
-        if age > SIGNAL_MAX_AGE:
-            log(f"Bo qua lenh cu ({age:.0f}s): {text.strip()}")
-            return
-        if not cfg["running"]:
-            log(f"Bot dang DUNG — bo qua lenh: {text.strip()}")
-            return
-        await execute_signal(text, "kenh", t0)
+        await handle_channel_text(event.id, event.raw_text or "", age, "kenh", time.time())
     except Exception as e:
         log(f"Loi xu ly tin Telegram: {e}")
 
@@ -550,7 +578,7 @@ async def bot_loop():
             r = await bot_api("getUpdates", offset=-1, timeout=0)
             ups = r.get("result") or []
             offset = ups[-1]["update_id"] + 1 if ups else None
-        p = {"timeout": 25, "allowed_updates": ["message"]}
+        p = {"timeout": 25, "allowed_updates": ["message", "channel_post"]}
         if offset:
             p["offset"] = offset
         r = await bot_api("getUpdates", **p)
@@ -559,6 +587,17 @@ async def bot_loop():
             continue
         for u in r["result"]:
             offset = u["update_id"] + 1
+            cp = u.get("channel_post")
+            if cp:   # bot la admin cua kenh phat lenh -> nghe truc tiep, khong can dang nhap
+                ch = cp.get("chat") or {}
+                num, uname = chan_norm()
+                if ch.get("id") in (num, tg["chan_num"]) or (uname and (ch.get("username") or "").lower() == uname):
+                    try:
+                        await handle_channel_text(cp["message_id"], cp.get("text") or "",
+                                                  time.time() - cp.get("date", time.time()), "kenh-bot", time.time())
+                    except Exception as e:
+                        log(f"Loi xu ly channel_post: {e}")
+                continue
             m = u.get("message") or {}
             chat = str((m.get("chat") or {}).get("id", ""))
             cmd = (m.get("text") or "").strip().split()[0:1]
@@ -609,7 +648,7 @@ async def h_state(req):
                      "positions": st.get("positions", []), "error": st.get("error", "")})
     return web.json_response({"version": VERSION, "running": cfg["running"], "mode": cfg["mode"],
                               "accounts": accs, "logs": list(logs)[:120], "tg": tg["state"],
-                              "channel": cfg["channel_title"], "bot": bool(cfg["bot_token"])})
+                              "channel": cfg["channel_title"] or cfg["channel_id"], "bot": bool(cfg["bot_token"])})
 
 
 async def h_get_cfg(req):
@@ -628,7 +667,7 @@ async def h_save_cfg(req):
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
     for k in ("env", "mode", "tg_api_id", "tg_phone", "bot_owner_id", "update_url",
-              "channel_id", "channel_title"):
+              "channel_id"):
         if k in d:
             cfg[k] = str(d[k]).strip()
     for k in ("size_unit", "custom_size", "custom_tp", "custom_sl"):
@@ -648,6 +687,7 @@ async def h_save_cfg(req):
     except Exception as e:
         log(f"Tai danh sach hop dong loi: {e}")
     await tg_init()
+    await resolve_channel()
     log("💾 Da luu cai dat")
     return web.json_response({"ok": True})
 
@@ -705,21 +745,11 @@ async def h_tg_sign_in(req):
                     return web.json_response({"ok": False, "msg": "Tai khoan co mat khau 2 lop — nhap mat khau roi bam Dang nhap lan nua"})
         tg["state"] = "ready"
         await cl.get_dialogs(limit=None)
+        await resolve_channel()
         log("Telegram: dang nhap thanh cong")
         return web.json_response({"ok": True, "msg": "Dang nhap thanh cong"})
     except Exception as e:
         return web.json_response({"ok": False, "msg": str(e)})
-
-
-async def h_tg_dialogs(req):
-    cl = tg["client"]
-    if not cl or tg["state"] != "ready":
-        return web.json_response({"ok": False, "msg": "Chua dang nhap Telegram", "list": []})
-    out = []
-    async for dlg in cl.iter_dialogs():
-        if dlg.is_channel or dlg.is_group:
-            out.append({"id": str(dlg.id), "title": dlg.name})
-    return web.json_response({"ok": True, "list": out})
 
 
 async def h_update(req):
@@ -786,6 +816,7 @@ async def main():
     except Exception as e:
         log(f"Tai danh sach hop dong loi: {e}")
     await tg_init()
+    await resolve_channel()
 
     app = web.Application(middlewares=[guard])
     app.add_routes([
@@ -794,7 +825,6 @@ async def main():
         web.post("/api/stop", h_stop), web.post("/api/close", h_close),
         web.post("/api/manual", h_manual), web.post("/api/update", h_update),
         web.post("/api/tg/send_code", h_tg_send_code), web.post("/api/tg/sign_in", h_tg_sign_in),
-        web.get("/api/tg/dialogs", h_tg_dialogs),
     ])
     runner = web.AppRunner(app)
     await runner.setup()
@@ -824,7 +854,8 @@ h2{font-size:14px;margin:0 0 10px;color:var(--yl);text-transform:uppercase;lette
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
 button{border:0;border-radius:7px;padding:8px 14px;font:600 13px inherit;cursor:pointer;color:#fff;background:#2c3440}
 button:hover{filter:brightness(1.15)}.b-gr{background:var(--gr);color:#04261b}.b-rd{background:var(--rd)}.b-yl{background:var(--yl);color:#231800}.b-bl{background:var(--bl)}
-input,select{width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px;color:var(--tx);padding:7px 9px;font:13px inherit}
+textarea{resize:vertical;font:12px/1.6 Consolas,monospace !important;white-space:pre;overflow-x:auto}
+input,select,textarea{width:100%;background:#0e1116;border:1px solid var(--line);border-radius:6px;color:var(--tx);padding:7px 9px;font:13px inherit}
 label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 .row{display:flex;gap:8px;align-items:end}.row>*{flex:1}.row>button{flex:0 0 auto}
 .pill{padding:4px 12px;border-radius:99px;font-weight:700;font-size:12px}.on{background:#0f3d2e;color:var(--gr)}.off{background:#43201f;color:var(--rd)}
@@ -875,15 +906,18 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 <div>
   <div class="card"><h2>Sub account Bybit</h2>
     <label>Môi trường</label><select id="env"><option value="mainnet">Mainnet (tiền thật)</option><option value="demo">Demo Trading (thử nghiệm)</option><option value="testnet">Testnet</option></select>
-    <label>Tên · API Key · API Secret (để trống secret = giữ secret cũ)</label>
-    <div id="accs"></div><button onclick="addAcc()">+ Thêm account</button>
+    <label>Mỗi dòng 1 sub account, định dạng <b>apikey=apisecret</b> (dòng 1 = Acc1, dòng 2 = Acc2…)</label>
+    <textarea id="acctxt" rows="6" spellcheck="false" placeholder="apikey=apisecret&#10;apikey=apisecret"></textarea>
   </div>
 
   <div class="card"><h2>Telegram — nghe kênh</h2>
-    <div class="row"><div><label>API ID</label><input id="tg_api_id"></div><div><label>API Hash</label><input id="tg_api_hash" type="password"></div></div>
-    <div class="row"><div><label>Số điện thoại (+84…)</label><input id="tg_phone"></div><button onclick="sendCode()">Lưu &amp; gửi mã</button></div>
-    <div class="row"><div><label>Mã đăng nhập</label><input id="tg_code"></div><div><label>Mật khẩu 2 lớp (nếu có)</label><input id="tg_pass" type="password"></div><button onclick="signIn()">Đăng nhập</button></div>
-    <div class="row"><div><label>Kênh phát lệnh</label><select id="channel"></select></div><button onclick="loadDialogs()">Tải danh sách</button></div>
+    <label>Channel ID của kênh phát lệnh (vd -1001234567890 hoặc @tenkenh)</label><input id="channel_id">
+    <div class="mut" style="font-size:12px;margin-top:6px">Trạng thái: <span id="tgst2"></span></div>
+    <details id="tglogin" style="margin-top:10px"><summary style="cursor:pointer;color:var(--mut)">Đăng nhập Telegram (chỉ làm 1 lần)</summary>
+      <div class="row"><div><label>API ID</label><input id="tg_api_id"></div><div><label>API Hash</label><input id="tg_api_hash" type="password"></div></div>
+      <div class="row"><div><label>Số điện thoại (+84…)</label><input id="tg_phone"></div><button onclick="sendCode()">Lưu &amp; gửi mã</button></div>
+      <div class="row"><div><label>Mã đăng nhập</label><input id="tg_code"></div><div><label>Mật khẩu 2 lớp (nếu có)</label><input id="tg_pass" type="password"></div><button onclick="signIn()">Đăng nhập</button></div>
+    </details>
   </div>
 
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
@@ -904,33 +938,28 @@ function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';cle
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const j=await r.json();if(j.msg)toast(j.msg);refresh();return j}catch(e){toast('Lỗi: '+e)}}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('m-custom').classList.toggle('sel',m=='custom');$('box-follow').style.display=m=='follow'?'':'none';$('box-custom').style.display=m=='custom'?'flex':'none'}
-function accRow(a){const d=document.createElement('div');d.className='accrow';d.innerHTML=`<input class="an" placeholder="Acc" value="${esc(a.name||'')}"><input class="ak" placeholder="API Key" value="${esc(a.key||'')}"><input class="as" type="password" placeholder="${a.has_secret?'•••• đã lưu':'API Secret'}">`;$('accs').appendChild(d)}
-function addAcc(){accRow({name:'Acc'+($('accs').children.length+1)})}
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_phone','bot_owner_id','update_url'])$(k).value=cfg[k]??'';
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_phone','bot_owner_id','update_url','channel_id'])$(k).value=cfg[k]??'';
   $('tg_api_hash').placeholder=cfg.has_api_hash?'•••• đã lưu':'';$('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
-  $('accs').innerHTML='';const n=Math.max(5,cfg.accounts.length);for(let i=0;i<n;i++)accRow(cfg.accounts[i]||{name:'Acc'+(i+1)});
-  $('channel').innerHTML=cfg.channel_id?`<option value="${esc(cfg.channel_id)}">${esc(cfg.channel_title||cfg.channel_id)}</option>`:'<option value="">— chưa chọn —</option>';
+  $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
-function collect(){const accounts=[...document.querySelectorAll('.accrow')].map(r=>({name:r.querySelector('.an').value,key:r.querySelector('.ak').value,secret:r.querySelector('.as').value}));
-  const ch=$('channel');const o={accounts,mode,channel_id:ch.value,channel_title:ch.value?ch.options[ch.selectedIndex].text:''};
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_api_hash','tg_phone','bot_token','bot_owner_id','update_url'])o[k]=$(k).value;return o}
+function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
+  const o={accounts,mode};
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','tg_api_id','tg_api_hash','tg_phone','bot_token','bot_owner_id','update_url','channel_id'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function sendCode(){await post('/api/config',collect());await post('/api/tg/send_code')}
-async function signIn(){const j=await post('/api/tg/sign_in',{code:$('tg_code').value,password:$('tg_pass').value});if(j&&j.ok)loadDialogs()}
-async function loadDialogs(){const j=await(await fetch('/api/tg/dialogs')).json();if(!j.ok){toast(j.msg);return}
-  const cur=$('channel').value;$('channel').innerHTML='<option value="">— chọn kênh —</option>'+j.list.map(d=>`<option value="${esc(d.id)}" ${d.id==cur?'selected':''}>${esc(d.title)}</option>`).join('');toast('Chọn kênh rồi bấm Lưu cài đặt')}
+async function signIn(){const j=await post('/api/tg/sign_in',{code:$('tg_code').value,password:$('tg_pass').value});if(j&&j.ok)$('tglogin').open=false}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
 async function update(){const j=await post('/api/update');if(j&&j.restart)setTimeout(()=>location.reload(),5000)}
 const TG={need_config:'chưa cài API',need_login:'chưa đăng nhập',code_sent:'đã gửi mã, chờ nhập',need_password:'cần mật khẩu 2 lớp',ready:'✅ đang nghe'};
 async function refresh(){try{const s=await(await fetch('/api/state')).json();
   $('run').textContent=s.running?'ĐANG CHẠY':'ĐANG DỪNG';$('run').className='pill '+(s.running?'on':'off');
-  $('tgst').textContent=TG[s.tg]||s.tg;$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=s.bot?'đã cài':'chưa cài';
+  $('tgst').textContent=TG[s.tg]||s.tg;$('tgst2').textContent=s.tg=='ready'?'✅ đã đăng nhập, đang nghe'+(s.channel?' kênh: '+s.channel:' (chưa nhập Channel ID)'):'⚠ chưa đăng nhập Telegram — mở mục bên dưới, làm 1 lần';if(!window._tgi){window._tgi=1;$('tglogin').open=s.tg!='ready'}$('chn').textContent=s.channel||'chưa chọn';$('botst').textContent=s.bot?'đã cài':'chưa cài';
   $('status').innerHTML=s.accounts.length?s.accounts.map(a=>{let body;
     if(a.error)body=`<span class="neg">⚠ ${esc(a.error)}</span>`;
     else if(!a.positions.length)body='<span class="mut">không có position</span>';
     else body=a.positions.map(p=>{const c=p.pnl>=0?'pos':'neg';return `${p.side=='Buy'?'Long':'Short'} <b>${esc(p.symbol)}</b>, <span class="${c}">${p.pct>=0?'+':''}${p.pct.toFixed(2)}%</span>, <span class="${c}">${p.pnl>=0?'+':''}${p.pnl.toFixed(2)} USDT</span> <span class="mut">(x${esc(p.lev)})</span>`}).join('<br>');
-    return `<div class="acc"><b>${esc(a.name)}:</b><div>${body}</div><div class="bal">${a.balance==null?'':'Khả dụng '+a.balance.toFixed(2)+' USDT'}</div></div>`}).join(''):'Chưa có sub account — nhập API key ở cột bên phải rồi bấm Lưu.';
+    return `<div class="acc"><b>${esc(a.name)}:</b><div>${body}</div><div class="bal">${a.balance==null?'':'Khả dụng '+a.balance.toFixed(2)+' USDT'}</div></div>`}).join(''):'Chưa có sub account — nhập apikey=apisecret ở cột bên phải rồi bấm Lưu.';
   $('logs').textContent=s.logs.join('\n')}catch(e){$('run').textContent='MẤT KẾT NỐI TOOL';$('run').className='pill off'}}
 loadCfg();refresh();setInterval(refresh,2000);
 </script></body></html>

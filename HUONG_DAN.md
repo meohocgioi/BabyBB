@@ -12,15 +12,19 @@ Với **từng** sub account: đăng nhập sub → API Management → tạo API
 - Nên khoá IP theo IP nhà bạn.
 - Sub account phải là **Unified Trading Account**, position mode **One-Way**.
 
-Dán Tên / API Key / API Secret vào tool → **Lưu cài đặt**. Thẻ Status sẽ hiện số dư từng acc.
+Dán vào ô Sub account, mỗi dòng một sub theo dạng `apikey=apisecret` (dòng 1 = Acc1, dòng 2 = Acc2…) → **Lưu cài đặt**. Thẻ Status sẽ hiện số dư từng acc.
 
 > Nên thử trước ở môi trường **Demo Trading** (tạo API key trong chế độ Demo của Bybit) rồi mới chuyển Mainnet.
 
-## 3. Nghe kênh Telegram (kênh của người khác)
+## 3. Nghe kênh Telegram
+Hằng ngày chỉ cần ô **Channel ID** (dạng `-1001234567890` hoặc `@tenkenh`) → **Lưu cài đặt**.
+
+Vì kênh là của người khác, tool phải đọc kênh bằng tài khoản Telegram của bạn — đăng nhập **một lần duy nhất** trong mục "Đăng nhập Telegram":
 1. Vào https://my.telegram.org → API development tools → tạo app → lấy **API ID** và **API Hash**.
 2. Nhập API ID, API Hash, số điện thoại (+84…) → **Lưu & gửi mã**.
-3. Nhập mã Telegram gửi về (và mật khẩu 2 lớp nếu có) → **Đăng nhập**.
-4. **Tải danh sách** → chọn kênh phát lệnh → **Lưu cài đặt**.
+3. Nhập mã Telegram gửi về (và mật khẩu 2 lớp nếu có) → **Đăng nhập**. Tài khoản này phải đang tham gia kênh.
+
+Không cần đăng nhập nếu chủ kênh thêm bot điều khiển của bạn (mục 4) làm admin kênh — khi đó bot tự nghe lệnh.
 
 ## 4. Bot điều khiển từ xa
 1. Nhắn @BotFather → `/newbot` → lấy **Bot Token**, dán vào tool → Lưu.

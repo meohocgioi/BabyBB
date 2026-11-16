@@ -4,7 +4,7 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
@@ -37,6 +37,7 @@ DEFAULT_CFG = {
     "custom_size": 1000,            # USDT gia tri position (che do custom)
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
+    "widgets": True,                # tin nhan bot dang widget (Telegram moi) hay chu thuong
     "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
@@ -223,6 +224,7 @@ class Bybit:
                         "avg": avg, "pnl": pnl,
                         "pct": (pnl / value * 100) if value else 0,
                         "lev": p.get("leverage"), "idx": int(p.get("positionIdx") or 0),
+                        "fee": max(0.0, -float(p.get("curRealisedPnl") or 0)),
                         "tp": p.get("takeProfit"), "sl": p.get("stopLoss")})
         return out
 
@@ -493,9 +495,54 @@ async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
     return head + "\n" + "\n".join(res)
 
 
-async def close_one(c):
-    out = []
+# ---------------------------------------------------------------------------
+# Trinh bay tin nhan bot: ban chu (fallback) + ban widget HTML (Telegram moi)
+# ---------------------------------------------------------------------------
+W_CSS = (
+    "<style>"
+    "body{margin:0;padding:11px 13px;font:14px/1.38 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+    "color:var(--tg-theme-text-color)}"
+    ".h{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:6px}"
+    ".h span:first-child{flex:1}"
+    ".pill{font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;color:#fff;white-space:nowrap}"
+    ".g{color:#1fa85a}.r{color:#e5484d}.bg{background:#1fa85a}.br{background:#e5484d}.bn{background:#8a8f98}"
+    ".m{color:var(--tg-theme-hint-color);font-size:12px}"
+    ".c{border-top:1px solid rgba(128,128,128,.28);padding:7px 0 6px}"
+    ".row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
+    ".n{font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap}"
+    ".t{font-weight:600}"
+    "code{font:600 13px ui-monospace,Menlo,Consolas,monospace;color:var(--tg-theme-link-color)}"
+    ".f{border-top:1px solid rgba(128,128,128,.28);padding-top:7px;margin-top:1px}"
+    "</style>"
+)
+esc = htmllib.escape
+
+
+def num(x):
+    """So gon cho gia/size: 2003.1, 0.01234"""
     try:
+        return f"{float(x):.6g}"
+    except Exception:
+        return str(x)
+
+
+def dot(x):
+    return "🟢" if x >= 0 else "🔴"
+
+
+def kl(x):
+    return "g" if x >= 0 else "r"
+
+
+def side_vn(side):
+    return "Long" if side == "Buy" else "Short"
+
+
+async def close_one(c):
+    """Dong moi position cua 1 acc, tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
+    rows = []
+    try:
+        t_ms = int(time.time() * 1000) + time_offset - 3000
         for p in await c.positions():
             r = await c.req("POST", "/v5/order/create", {
                 "category": "linear", "symbol": p["symbol"],
@@ -503,35 +550,139 @@ async def close_one(c):
                 "orderType": "Market", "qty": p["size"],
                 "reduceOnly": True, "positionIdx": p["idx"]})
             ok = r.get("retCode") == 0
-            out.append(f"{'✅' if ok else '❌'} {c.name}: đóng {p['symbol']}"
-                       + ("" if ok else f" lỗi: {r.get('retMsg')}"))
+            rows.append({"acc": c.name, "symbol": p["symbol"], "side": p["side"], "size": p["size"],
+                         "lev": p["lev"], "entry": p["avg"], "exit": None, "fee": None,
+                         "pnl": p["pnl"], "pct": p["pct"], "est": True,
+                         "ok": ok, "err": "" if ok else str(r.get("retMsg"))})
+        want = {x["symbol"] for x in rows if x["ok"]}
+        agg = {}
+        for _ in range(5):                 # cho Bybit ghi nhan ket qua dong lenh
+            if not want:
+                break
+            await asyncio.sleep(0.5)
+            r = await c.req("GET", "/v5/position/closed-pnl",
+                            {"category": "linear", "startTime": str(t_ms), "limit": "100"})
+            if r.get("retCode") != 0:      # vd Demo Trading khong ho tro
+                break
+            agg = {}
+            for it in r["result"]["list"]:
+                a = agg.setdefault(it["symbol"], {"pnl": 0.0, "fee": 0.0, "ev": 0.0, "xv": 0.0, "q": 0.0})
+                a["pnl"] += float(it.get("closedPnl") or 0)
+                a["fee"] += float(it.get("openFee") or 0) + float(it.get("closeFee") or 0)
+                a["ev"] += float(it.get("cumEntryValue") or 0)
+                a["xv"] += float(it.get("cumExitValue") or 0)
+                a["q"] += float(it.get("closedSize") or it.get("qty") or 0)
+            if want <= set(agg):
+                break
+        for x in rows:
+            a = agg.get(x["symbol"])
+            if x["ok"] and a and a["q"]:
+                x.update(pnl=a["pnl"], fee=a["fee"], exit=a["xv"] / a["q"], est=False,
+                         pct=(a["pnl"] / a["ev"] * 100) if a["ev"] else 0)
     except Exception as e:
-        out.append(f"❌ {c.name}: {e}")
-    return out
+        rows.append({"acc": c.name, "symbol": "", "ok": False, "err": str(e)[:120]})
+    return rows
 
 
 async def close_all():
+    """-> (ban chu, ban widget HTML)"""
     res = await asyncio.gather(*(close_one(c) for c in clients))
-    lines = [l for sub in res for l in sub] or ["Không có position nào đang mở"]
-    for l in lines:
-        log(l)
-    return "\n".join(lines)
+    rows = [x for sub in res for x in sub]
+    if not rows:
+        log("Không có position nào đang mở")
+        return ("🛑 Không có position nào đang mở",
+                W_CSS + '<div class="h"><span>🛑 Market close</span></div><div class="m">Không có position nào đang mở.</div>')
+    done = [x for x in rows if x["ok"]]
+    tot = sum(x["pnl"] for x in done)
+    fees = [x["fee"] for x in done if x["fee"] is not None]
+    est = any(x["est"] for x in done)
+    T = [f"🛑 Đã đóng {len(done)}/{len(rows)} position"]
+    H = [W_CSS, f'<div class="h"><span>🛑 Đã đóng {len(done)}/{len(rows)} position</span>']
+    if done:
+        H.append(f'<span class="pill b{kl(tot)}">{tot:+.2f} USDT</span>')
+    H.append("</div>")
+    for x in rows:
+        if not x["ok"]:
+            T.append(f"❌ {x['acc']}: {x['symbol']} lỗi: {x['err']}")
+            H.append(f'<div class="c"><div class="t">{esc(x["acc"])} · {esc(x["symbol"])}</div>'
+                     f'<div class="r">Lỗi: {esc(x["err"])}</div></div>')
+            log(T[-1])
+            continue
+        px = f"{num(x['entry'])} → {num(x['exit'])}" if x["exit"] else f"entry {num(x['entry'])}"
+        fee = f"{x['fee']:.4f} USDT" if x["fee"] is not None else "chưa có số liệu"
+        tag = " (ước tính)" if x["est"] else ""
+        T.append(f"{x['acc']} · {side_vn(x['side'])} {x['symbol']} x{x['lev']}\n"
+                 f"   Size {x['size']} | {px}\n"
+                 f"   Phí {fee} | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+        H.append(f'<div class="c"><div class="row"><span class="t">{esc(x["acc"])} · {side_vn(x["side"])} '
+                 f'{esc(x["symbol"])} <span class="m">x{esc(str(x["lev"]))}</span></span>'
+                 f'<span class="n {kl(x["pnl"])}">{x["pct"]:+.2f}%</span></div>'
+                 f'<div class="row"><span class="m">Size {esc(str(x["size"]))} · {esc(px)}</span>'
+                 f'<span class="n {kl(x["pnl"])}">{x["pnl"]:+.4f} USDT</span></div>'
+                 f'<div class="m">Phí đã trả: {fee}{tag}</div></div>')
+        log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+    if done:
+        ft = f"{sum(fees):.4f} USDT" if fees else "chưa có số liệu"
+        note = "PnL ước tính theo giá lúc đóng, chưa trừ phí" if est else "PnL đã trừ phí mở + đóng"
+        T.append(f"Tổng phí {ft} | Tổng PnL {dot(tot)} {tot:+.4f} USDT\n({note})")
+        H.append(f'<div class="f row"><span class="m">Tổng phí {ft}</span>'
+                 f'<span class="n {kl(tot)}">{tot:+.4f} USDT</span></div><div class="m">{note}</div>')
+    return "\n".join(T), "".join(H)
 
 
 def status_text():
     lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
              f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy all-in: {lev_label()}"]
+    tot = 0.0
     for c in clients:
         st = status.get(c.name) or {}
+        bal = f" (khả dụng {st['balance']:.2f} USDT)" if st.get("balance") is not None else ""
         if st.get("error"):
             lines.append(f"{c.name}: ⚠️ {st['error']}")
         elif not st.get("positions"):
-            lines.append(f"{c.name}: không có position")
+            lines.append(f"{c.name}: không có position{bal}")
         else:
             for p in st["positions"]:
-                side = "Long" if p["side"] == "Buy" else "Short"
-                lines.append(f"{c.name}: {side} {p['symbol']}, {p['pct']:+.2f}%, {p['pnl']:+.2f} USDT")
+                tot += p["pnl"]
+                lines.append(f"{c.name}: {side_vn(p['side'])} {p['symbol']} x{p['lev']}\n"
+                             f"   Size {p['size']} | entry {num(p['avg'])} | phí {p.get('fee', 0):.4f}\n"
+                             f"   {dot(p['pnl'])} {p['pct']:+.2f}% | {p['pnl']:+.4f} USDT")
+    if any((status.get(c.name) or {}).get("positions") for c in clients):
+        lines.append(f"Tổng PnL đang mở: {dot(tot)} {tot:+.4f} USDT")
     return "\n".join(lines)
+
+
+def status_html(title=None):
+    run = cfg["running"]
+    H = [W_CSS, f'<div class="h"><span>{esc(title or "📊 Trạng thái")}</span>'
+                f'<span class="pill {"bg" if run else "br"}">{"ĐANG CHẠY" if run else "ĐANG DỪNG"}</span></div>',
+         f'<div class="m" style="margin-bottom:6px">{"Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"}'
+         f' · Đòn bẩy all-in: {esc(lev_label())}</div>']
+    tot, has = 0.0, False
+    for c in clients:
+        st = status.get(c.name) or {}
+        bal = f'{st["balance"]:.2f} USDT' if st.get("balance") is not None else ""
+        if st.get("error"):
+            H.append(f'<div class="c"><div class="t">{esc(c.name)}</div><div class="r">⚠ {esc(st["error"])}</div></div>')
+        elif not st.get("positions"):
+            H.append(f'<div class="c row"><span><span class="t">{esc(c.name)}</span> '
+                     f'<span class="m">không có position</span></span><span class="m">{bal}</span></div>')
+        else:
+            for p in st["positions"]:
+                has = True
+                tot += p["pnl"]
+                H.append(f'<div class="c"><div class="row"><span class="t">{esc(c.name)} · {side_vn(p["side"])} '
+                         f'{esc(p["symbol"])} <span class="m">x{esc(str(p["lev"]))}</span></span>'
+                         f'<span class="n {kl(p["pnl"])}">{p["pct"]:+.2f}%</span></div>'
+                         f'<div class="row"><span class="m">Size {esc(str(p["size"]))} · entry {num(p["avg"])}'
+                         f' · phí {p.get("fee", 0):.4f}</span>'
+                         f'<span class="n {kl(p["pnl"])}">{p["pnl"]:+.4f} USDT</span></div></div>')
+    if not clients:
+        H.append('<div class="c m">Chưa cài sub account nào.</div>')
+    if has:
+        H.append(f'<div class="f row"><span class="m">Tổng PnL đang mở</span>'
+                 f'<span class="n {kl(tot)}">{tot:+.4f} USDT</span></div>')
+    return "".join(H)
 
 
 async def status_loop():
@@ -684,21 +835,23 @@ def parse_allin(text):
     return {"coin": m.group(1).upper(), "tp": f(m.group(2)), "sl": f(m.group(3))}
 
 
-HELP_TEXT = (
-    "📖 Các lệnh:\n"
-    "/start — chạy bot (nghe lệnh từ kênh)\n"
-    "/stop — dừng bot (position đang mở giữ nguyên)\n"
-    "/status — xem position và PnL từng acc\n"
-    "/buy #coin size tp sl — mở Long ngay trên tất cả acc\n"
-    "      size = USDT, tp/sl = % so với giá entry\n"
-    "      vd: /buy #eth 1000 10 2\n"
-    "/lev N — đặt đòn bẩy cho /allin (vd /lev 10; /lev max = max của coin)\n"
-    "/allin #coin tp sl — all-in toàn bộ vốn mỗi acc với đòn bẩy /lev\n"
-    "      coin không cho tới mức đó thì tự hạ xuống max của coin\n"
-    "      vd: /allin #evaa 10 2\n"
-    "/close — market close toàn bộ position\n"
-    "/help — hiện danh sách lệnh này"
-)
+HELP_ITEMS = [
+    ("/start", "Chạy bot — bắt đầu nghe lệnh từ kênh"),
+    ("/stop", "Dừng bot — position đang mở giữ nguyên"),
+    ("/status", "Xem position, phí và PnL từng acc"),
+    ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
+    ("/lev N", "Đặt đòn bẩy cho /allin. Vd: /lev 10 — hoặc /lev max = max của coin"),
+    ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
+    ("/close", "Market close toàn bộ position, báo phí và PnL"),
+    ("/help", "Hiện danh sách lệnh này"),
+]
+HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
+
+
+def help_html():
+    return (W_CSS + '<div class="h"><span>📖 Các lệnh</span></div>'
+            + "".join(f'<div class="c"><code>{esc(c)}</code><div class="m">{esc(d)}</div></div>' for c, d in HELP_ITEMS))
+
 
 BUY_RE = re.compile(r"^/buy(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
 
@@ -746,6 +899,28 @@ async def _send(chat, text):
         if "Timeout" not in desc and "Connect" not in desc and "Disconnected" not in desc:
             break                      # loi tu Telegram (khong phai mang) -> thu lai vo ich
     log(f"⚠️ Bot không gửi được tin trả lời: {desc}")
+
+
+async def _send_rich(chat, text, doc):
+    """Thu gui dang widget; khong duoc thi gui ban chu."""
+    if cfg.get("widgets", True) and botst.get("widget") is not False:
+        for _ in range(3):
+            r = await bot_api("sendWidget", _quiet=True, chat_id=chat, html=doc, caption=text[:1000], width=340)
+            if r.get("ok"):
+                botst["widget"] = True
+                return
+            desc = str(r.get("description"))
+            if "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
+                continue               # loi mang -> thu lai
+            if "not found" in desc.lower() or "404" in desc:
+                botst["widget"] = False   # Bot API chua co sendWidget -> thoi khong thu nua
+            log(f"Widget Telegram chưa dùng được ({desc[:80]}) — gửi bản chữ thay thế")
+            break
+    await _send(chat, text)
+
+
+def send_rich(chat, text, doc):
+    asyncio.create_task(_send_rich(chat, text, doc))
 
 
 def send(chat, text):
@@ -829,15 +1004,20 @@ async def handle_update(u):
                 return
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
-                reply = "▶️ Bot ĐÃ CHẠY\n" + status_text()
+                send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_html("▶️ Bot đã chạy"))
+                return
             elif cmd == "/stop":
                 cfg["running"] = False; save_cfg(); log("⏸ Stop (từ Telegram)")
-                reply = "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)"
+                send_rich(chat, "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)\n" + status_text(),
+                          status_html("⏸ Bot đã dừng"))
+                return
             elif cmd == "/close":
                 log("🛑 Close all (từ Telegram)")
-                reply = "🛑 Market close tất cả:\n" + await close_all()
+                send_rich(chat, *(await close_all()))
+                return
             elif cmd == "/status":
-                reply = status_text()
+                send_rich(chat, status_text(), status_html())
+                return
             elif cmd == "/lev":
                 arg = (m.get("text") or "").split()[1:2]
                 arg = arg[0].lower().lstrip("x").replace(",", ".") if arg else ""
@@ -876,7 +1056,8 @@ async def handle_update(u):
                     await execute_order(b["coin"], b["size"], b["tp"], b["sl"], "/buy")
                     return   # ket qua da duoc gui qua notify()
             else:
-                reply = HELP_TEXT
+                send_rich(chat, HELP_TEXT, help_html())
+                return
             send(chat, reply)
 
 
@@ -921,6 +1102,9 @@ async def h_save_cfg(req):
         secret = (a.get("secret") or "").strip() or old.get(key, "")
         accs.append({"name": (a.get("name") or f"Acc{i+1}").strip(), "key": key, "secret": secret})
     cfg["accounts"] = accs
+    if "widgets" in d:
+        cfg["widgets"] = str(d["widgets"]) != "0"
+        botst.pop("widget", None)
     if "allin_lev" in d:
         v = str(d["allin_lev"]).strip().lower().lstrip("x").replace(",", ".")
         cfg["allin_lev"] = v
@@ -966,7 +1150,7 @@ async def h_stop(req):
 
 async def h_close(req):
     log("🛑 Close all (từ tool)")
-    return web.json_response({"ok": True, "msg": await close_all()})
+    return web.json_response({"ok": True, "msg": (await close_all())[0]})
 
 
 async def h_manual(req):
@@ -1145,6 +1329,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
   <div class="card"><h2>Bot Telegram điều khiển từ xa</h2>
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
+    <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Widget có màu (Telegram bản mới)</option><option value="0">Chữ thường</option></select>
     <label>Đòn bẩy cho /allin (số, hoặc max = max của coin)</label><input id="allin_lev" placeholder="chưa đặt">
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
@@ -1164,10 +1349,11 @@ function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id','allin_lev'])$(k).value=cfg[k]??'';
   $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
+  $('widgets').value=cfg.widgets===false?'0':'1';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
-  const o={accounts,mode};
+  const o={accounts,mode,widgets:$('widgets').value};
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}

@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.13.1"
+VERSION = "1.13.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.13.2", ["Tin báo đóng position (/close, Close Order 100%) gọn như bảng /status: 3 cột, PnL % dưới tên acc, tên coin rút gọn, Size làm tròn, dòng Fee ở cuối"]),
     ("1.13.1", ["Thêm nút Remove TP (dưới Edit TP) và Remove SL (dưới Edit SL) — gỡ TP/SL của mọi position trên mọi acc"]),
     ("1.13.0", ["Nút dưới /status: Close Partial Position đổi thành Close Order — bấm mới bung hàng 10/30/50/70/100%",
                 "Nút mới Edit TP & SL → Edit TP / Edit SL → 1/3/5/7/10% tính từ giá entry, áp dụng cho mọi position trên mọi acc"]),
@@ -731,8 +732,6 @@ def r_foot(text):
     return {"type": "footer", "text": text}
 
 
-POS_HEAD = ["Acc", "Position", "Phí", "PnL %", "PnL USDT"]
-POS_ALIGN = [None, None, "right", "right", "right"]
 STATUS_HEAD = ["Acc", "Position", "uPnL"]       # /status: PnL % nam duoi ten acc, tong phi o dong cuoi
 STATUS_ALIGN = [None, None, "right"]
 
@@ -907,17 +906,19 @@ async def close_all():
         T.append(f"{x['acc']} · {side_vn(x['side'])} {x['symbol']} x{x['lev']}\n"
                  f"   Size {x['usd']:.2f} USDT | {px}\n"
                  f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
-        R.append([B(x["acc"]), [B(f"{side_vn(x['side'])} {x['symbol']}"), f" x{x['lev']}\nSize {x['usd']:.2f} USDT\n{px}"],
-                  fee, f"{dot(x['pnl'])} {x['pct']:+.2f}%", B(f"{x['pnl']:+.2f}{'*' if x['est'] else ''}")])
+        R.append([[B(x["acc"]), f"\n{dot(x['pnl'])}\u00a0{x['pct']:+.2f}%"],
+                  [B(f"{side_vn(x['side'])} {coin_of(x['symbol'])}"), f" x{x['lev']}\nSize {x['usd']:.0f}\n{px}"],
+                  B(f"{x['pnl']:+.2f}{'*' if x['est'] else ''}")])
         log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
     blocks = [r_head(f"🛑 Đã đóng {len(done)}/{len(rows)} position")]
     if done:
         ft = f"{sum(fees):.2f}" if fees else "—"
         note = ("* PnL ước tính theo giá lúc đóng, chưa trừ phí (Bybit chưa trả số liệu)" if est
-                else "PnL đã trừ phí mở + đóng. Đơn vị: USDT.")
+                else "PnL đã gồm phí · USDT")
         T.append(f"Tổng phí {ft} USDT | Tổng PnL {dot(tot)} {tot:+.2f} USDT\n({note})")
-        R.append([B("Tổng"), "", B(ft), dot(tot), B(f"{tot:+.2f}")])
-        blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
+        R.append([B("Tổng"), "", B(f"{dot(tot)}\u00a0{tot:+.2f}")])
+        R.append([B("Fee"), "", B(ft)])
+        blocks.append(r_table(["Acc", "Position", "PnL"], R, [None, None, "right"]))
         blocks.append(r_foot(note))
     for e in errs:
         blocks.append(r_par(e))

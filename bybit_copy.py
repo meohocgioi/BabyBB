@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.12.0", ["/status có chart nến 1 phút (60 nến gần nhất) của coin đang mở, kèm vạch ENTRY / TP / SL",
+                "Chart tự cập nhật khoảng 15 giây/lần cho đến khi mọi sub account đóng hết position",
+                "Đang mở nhiều coin thì vẽ coin có size lớn nhất"]),
     ("1.11.1", ["Bỏ dòng Total fee ở /per và Position History (PnL đã gồm phí)"]),
     ("1.11.0", ["/per và Position History gọn hơn trên điện thoại: bỏ cột Fee, thêm dòng Total fee cuối bảng",
                 "Chấm 🟢/🔴 nằm cùng dòng với số PnL; Position History ghi Long/Short và số acc (vd 4 acc)",
@@ -1139,7 +1142,7 @@ def parse_allin(text):
 HELP_ITEMS = [
     ("/start", "Chạy bot — bắt đầu nghe lệnh từ kênh"),
     ("/stop", "Dừng bot — position đang mở giữ nguyên"),
-    ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục"),
+    ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục, kèm chart nến 1m khi có position"),
     ("/per", "Performance của các acc: 1 day / This week / This Month, và Position History"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
     ("/sell #coin size tp sl", "Mở Short ngay trên tất cả acc (ngược với /buy). TP khi giá giảm tp%, SL khi giá tăng sl%. Vd: /sell #eth 1000 10 2"),
@@ -1307,6 +1310,10 @@ LIVE_EVERY = 3         # giay giua 2 lan sua tin (khi so lieu thay doi)
 LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
+def live_sig():
+    return json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + f"|{live.get('png_v', 0) if live.get('png') else 0}"
+
+
 def live_stamp():
     return f"Last Update: {datetime.now().strftime('%H:%M:%S')}"
 
@@ -1328,8 +1335,8 @@ async def start_live(chat):
     live["confirm"] = None
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
     if mid:
-        live.update(chat=chat, mid=mid, rich=rich, sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False),
-                    t=time.time(), wait=0.0)
+        live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, chart_off=False,
+                    sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + "|0")   # "|0": chua kem bieu do
         cfg["live_msg"] = [chat, mid, rich]
         save_cfg()
 
@@ -1340,6 +1347,18 @@ async def live_edit(chat, mid, rich, final=False):
     kb = None if final else live_kb()
     if kb:
         p["reply_markup"] = kb             # sua tin ma khong gui kem thi Telegram xoa mat nut
+    png = None if final else live.get("png")
+    if rich and png and not live.get("chart_off"):         # kem bieu do nen 1m ngay duoi tieu de
+        blocks = status_blocks(stamp=stamp)
+        f = {"chat_id": str(chat), "message_id": str(mid), "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}}
+        if kb:
+            f["reply_markup"] = kb
+        r = await bot_form("editMessageText", f, {"chart": png})
+        desc = str(r.get("description") or "")
+        if r.get("ok") or "not modified" in desc or _net_err(desc) or "Too Many Requests" in desc or "retry after" in desc.lower():
+            return r
+        live["chart_off"] = True
+        log(f"/status: Telegram không nhận biểu đồ trong tin ({desc[:100]}) — tiếp tục cập nhật không kèm biểu đồ")
     if rich:
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
     else:
@@ -1361,7 +1380,9 @@ async def live_loop():
                 continue
             if live.get("confirm") and live["confirm"][1] < now:
                 live["confirm"] = None     # het han xac nhan -> tra lai hang nut %
-            sig = json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
+            if busy["n"] and live.get("png"):
+                continue                   # dang vao/dong lenh: khong tai anh len luc nay
+            sig = live_sig()
             if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
                 continue
             r = await live_edit(live["chat"], live["mid"], live["rich"])
@@ -1561,6 +1582,188 @@ def chart_for(kind):
         return None, f"Biểu đồ: chưa đủ dữ liệu (ghi 5 phút/lần từ {since})"
     since = datetime.fromtimestamp(bal_hist[0][0]).strftime("%d/%m %H:%M")
     return render_chart(pts, ticks), f"Biểu đồ: balance TB mỗi acc, từ {since}"
+
+
+# --- /status: bieu do nen 1 phut cua coin dang co position ---
+_FONT.update({
+    "A": "01110 10001 10001 11111 10001 10001 10001", "B": "11110 10001 10001 11110 10001 10001 11110",
+    "C": "01110 10001 10000 10000 10000 10001 01110", "D": "11110 10001 10001 10001 10001 10001 11110",
+    "E": "11111 10000 10000 11110 10000 10000 11111", "F": "11111 10000 10000 11110 10000 10000 10000",
+    "G": "01110 10001 10000 10111 10001 10001 01111", "H": "10001 10001 10001 11111 10001 10001 10001",
+    "I": "01110 00100 00100 00100 00100 00100 01110", "J": "00111 00010 00010 00010 00010 10010 01100",
+    "K": "10001 10010 10100 11000 10100 10010 10001", "L": "10000 10000 10000 10000 10000 10000 11111",
+    "M": "10001 11011 10101 10101 10001 10001 10001", "N": "10001 11001 10101 10011 10001 10001 10001",
+    "O": "01110 10001 10001 10001 10001 10001 01110", "P": "11110 10001 10001 11110 10000 10000 10000",
+    "Q": "01110 10001 10001 10001 10101 10010 01101", "R": "11110 10001 10001 11110 10100 10010 10001",
+    "S": "01111 10000 10000 01110 00001 00001 11110", "T": "11111 00100 00100 00100 00100 00100 00100",
+    "U": "10001 10001 10001 10001 10001 10001 01110", "V": "10001 10001 10001 10001 10001 01010 00100",
+    "W": "10001 10001 10001 10101 10101 10101 01010", "X": "10001 10001 01010 00100 01010 10001 10001",
+    "Y": "10001 10001 01010 00100 00100 00100 00100", "Z": "11111 00001 00010 00100 01000 10000 11111",
+})
+CHART_EVERY = 15           # giay giua 2 lan lay nen 1m + ve lai
+CHART_BARS = 60            # so nen 1 phut tren bieu do
+C_UP, C_DOWN, C_ENTRY = b"\x26\xa6\x9a", b"\xef\x53\x50", b"\x2f\x7f\xe0"
+C_TP, C_SL = b"\x1b\x8a\x5a", b"\xd6\x3b\x3b"
+
+
+def price_dec(symbol):
+    """So chu so sau dau cham khi in gia: gia >= 1 -> 2; gia nho -> theo buoc gia cua san."""
+    try:
+        return min(8, max(2, -instruments[symbol]["tick"].as_tuple().exponent))
+    except Exception:
+        return 4
+
+
+def render_candles(candles, marks, title, dec=2, W=900, H=480):
+    """candles = [(ts, o, h, l, c)] tang dan; marks = [(nhan, gia, mau)] -> bytes PNG"""
+    L, R, T, Bm = 14, 124, 44, 40
+    buf = bytearray(b"\xff" * (W * H * 3))
+
+    def px(x, y, col):
+        if 0 <= x < W and 0 <= y < H:
+            i = (y * W + x) * 3
+            buf[i:i + 3] = col
+
+    def rect(x0, y0, x1, y1, col):
+        x0, x1 = max(0, x0), min(W - 1, x1)
+        for y in range(max(0, y0), min(H - 1, y1) + 1):
+            i = (y * W + x0) * 3
+            buf[i:i + (x1 - x0 + 1) * 3] = col * (x1 - x0 + 1)
+
+    def text(x, y, s, col, sc=2):
+        for ch in s:
+            g = _FONT.get(ch, _FONT[" "]).split()
+            for r, row in enumerate(g):
+                for c, bit in enumerate(row):
+                    if bit == "1":
+                        rect(x + c * sc, y + r * sc, x + c * sc + sc - 1, y + r * sc + sc - 1, col)
+            x += 6 * sc
+
+    tw = lambda s, sc=2: len(s) * 6 * sc
+    pl = lambda v: f"{v:.2f}" if abs(v) >= 1 else f"{v:.{dec}f}"
+    GRID, AXIS, TXT, WHITE = b"\xee\xf0\xf3", b"\x9a\xa3\xaf", b"\x4a\x52\x5e", b"\xff\xff\xff"
+    lo, hi = min(c[3] for c in candles), max(c[2] for c in candles)
+    span0 = max(hi - lo, abs(hi) * 0.001)
+    for _, v, _ in marks:                    # vach Entry/TP/SL chi keo rong truc khi nam gan vung gia
+        if lo - span0 * 1.5 <= v <= hi + span0 * 1.5:
+            lo, hi = min(lo, v), max(hi, v)
+    pad = max(hi - lo, abs(hi) * 0.001) * 0.08
+    lo, hi = lo - pad, hi + pad
+    pw, ph = W - L - R, H - T - Bm
+    Y = lambda v: T + int((hi - v) / (hi - lo) * ph)
+    slot = pw / max(len(candles), 1)
+    bw = max(2, int(slot * 0.62))
+    X = lambda i: L + int(slot * i + slot / 2)
+    for k in range(5):                       # luoi ngang + gia ben phai
+        v = lo + (hi - lo) * k / 4
+        rect(L, Y(v), W - R, Y(v), GRID)
+        text(W - R + 10, Y(v) - 7, pl(v), TXT)
+    for i, c in enumerate(candles):          # luoi doc + gio moi 15 phut
+        d = datetime.fromtimestamp(c[0])
+        if d.minute % 15 == 0:
+            rect(X(i), T, X(i), H - Bm, GRID)
+            lab = d.strftime("%H:%M")
+            text(min(max(X(i) - tw(lab) // 2, 2), W - R - tw(lab)), H - Bm + 12, lab, TXT)
+    rect(L, H - Bm, W - R, H - Bm, AXIS)
+    rect(W - R, T, W - R, H - Bm, AXIS)
+    for i, (_, o, h, l, c) in enumerate(candles):
+        col = C_UP if c >= o else C_DOWN
+        x = X(i)
+        rect(x, Y(h), x + 1, Y(l), col)                                 # rau nen
+        ya, yb = sorted((Y(o), Y(c)))
+        rect(x - bw // 2 + 1, ya, x - bw // 2 + bw, max(yb, ya + 1), col)   # than nen
+    tags = [(lab, v, col) for lab, v, col in marks if lo <= v <= hi]
+    last = candles[-1][4]
+    tags.append(("", last, C_UP if last >= candles[-1][1] else C_DOWN))
+    for lab, v, col in tags:
+        y = Y(v)
+        if lab:
+            for x in range(L, W - R, 10):    # duong gach ngang
+                rect(x, y, x + 5, y + 1, col)
+            text(L + 6, y - 18 if y - 18 > T else y + 6, lab, col)
+        rect(W - R + 1, y - 10, W - 2, y + 10, col)                     # nhan gia tren truc
+        text(W - R + 10, y - 7, pl(v), WHITE)
+    text(L + 2, 14, title, TXT)
+    raw = b"".join(b"\x00" + bytes(buf[y * W * 3:(y + 1) * W * 3]) for y in range(H))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def chart_target():
+    """Coin de ve: coin co tong size (USDT) lon nhat trong cac position dang mo. -> dict | None"""
+    agg = {}
+    for c in clients:
+        for p in (status.get(c.name) or {}).get("positions") or []:
+            try:
+                size = float(p["size"])
+                a = agg.setdefault(p["symbol"], {"usd": 0.0, "qty": 0.0, "val": 0.0, "side": {}, "tp": [], "sl": []})
+                a["usd"] += size * p["avg"]; a["qty"] += size; a["val"] += size * p["avg"]
+                a["side"][p["side"]] = a["side"].get(p["side"], 0) + size * p["avg"]
+                for k in ("tp", "sl"):
+                    v = float(p.get(k) or 0)
+                    if v > 0:
+                        a[k].append(v)
+            except Exception:
+                continue
+    if not agg:
+        return None
+    sym, a = max(agg.items(), key=lambda kv: kv[1]["usd"])
+    avg = lambda xs: sum(xs) / len(xs) if xs else None
+    return {"symbol": sym, "side": max(a["side"], key=a["side"].get), "entry": a["val"] / a["qty"] if a["qty"] else None,
+            "tp": avg(a["tp"]), "sl": avg(a["sl"])}
+
+
+def chart_png(tg, candles):
+    dec = price_dec(tg["symbol"])
+    pl = lambda v: f"{v:.2f}" if abs(v) >= 1 else f"{v:.{dec}f}"
+    marks, title = [], f"{tg['symbol']} 1M  {side_vn(tg['side']).upper()}"
+    for lab, key, col in (("ENTRY", "entry", C_ENTRY), ("TP", "tp", C_TP), ("SL", "sl", C_SL)):
+        if tg.get(key):
+            marks.append((lab, tg[key], col))
+            title += f"  {lab} {pl(tg[key])}"
+    return render_candles(candles, marks, title, dec)
+
+
+async def fetch_candles(symbol):
+    r = await asyncio.wait_for(public_client().req("GET", "/v5/market/kline", {
+        "category": "linear", "symbol": symbol, "interval": "1", "limit": str(CHART_BARS)}, auth=False), 8)
+    rows = sorted((r.get("result") or {}).get("list") or [], key=lambda x: int(x[0]))
+    return [(int(x[0]) / 1000, float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in rows]
+
+
+async def chart_loop():
+    """Giu san anh bieu do nen 1m cho tin /status dang tu cap nhat. Het position -> bo anh."""
+    nxt = 0.0
+    while True:
+        await asyncio.sleep(1)
+        try:
+            on = live["mid"] and live["rich"] and cfg["bot_token"] and not live.get("chart_off")
+            tg = chart_target() if on else None
+            if not tg:
+                if live.get("png"):
+                    live.update(png=None, png_sym=None, png_v=live.get("png_v", 0) + 1)
+                nxt = 0.0
+                continue
+            now = time.time()
+            if busy["n"] or (now < nxt and live.get("png_sym") == tg["symbol"]):
+                continue                     # dang vao/dong lenh -> nhuong duong
+            nxt = now + 5                    # loi thi 5 giay sau thu lai
+            candles = await fetch_candles(tg["symbol"])
+            if len(candles) < 2:
+                continue
+            if time.time() - prices["t"] <= PRICE_MAX_AGE and tg["symbol"] in prices["map"]:
+                t, o, h, l, _ = candles[-1]  # nen cuoi theo gia moi nhat
+                px = float(prices["map"][tg["symbol"]])
+                candles[-1] = (t, o, max(h, px), min(l, px), px)
+            png = await asyncio.to_thread(chart_png, tg, candles)
+            live.update(png=png, png_sym=tg["symbol"], png_v=live.get("png_v", 0) + 1)
+            nxt = time.time() + CHART_EVERY
+        except Exception as e:
+            log(f"chart 1m: {type(e).__name__}: {str(e)[:100]}")
+            nxt = time.time() + 10
 
 
 # --- /per: performance + lich su position (lay tu lich su dong lenh cua Bybit) ---
@@ -2175,6 +2378,9 @@ def selftest():
     assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
     global clients
     clients = [Bybit("Acc1", "k", "s", "x")]
+    _cd = [(1700000000 + 60 * i, 100 + i % 7, 101.5 + i % 7, 99.2 + i % 5, 100.4 + (i * 3) % 7) for i in range(60)]
+    assert chart_target() is None
+    assert chart_png({"symbol": "ETHUSDT", "side": "Buy", "entry": 101.0, "tp": 104.0, "sl": 90.0}, _cd)[:4] == b"\x89PNG"
     status["Acc1"] = {"balance": 1.0, "error": "", "t": 0, "positions": [
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}
@@ -2255,6 +2461,7 @@ async def main():
     asyncio.create_task(tg_keepalive())
     asyncio.create_task(clear_pending_later())
     asyncio.create_task(live_loop())
+    asyncio.create_task(chart_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()

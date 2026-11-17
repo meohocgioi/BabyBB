@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.16.2", ["Vào thêm lệnh vào position đang mở cùng coin: tool tính đòn bẩy trên cả position và không hạ đòn bẩy, hết lỗi \"ab not enough for new leverage\"",
+                "Nếu Bybit vẫn không cho đổi đòn bẩy, tin báo ghi đúng đòn bẩy thực tế của lệnh"]),
     ("1.16.1", ["Sửa lỗi Health Bar / chart 1m biến mất hẳn khỏi /status sau một lần Telegram lỗi tạm thời — giờ tự hiện lại sau ít giây",
                 "Lỗi máy chủ Telegram (502/500) không còn làm tin /status ngừng cập nhật"]),
     ("1.16.0", ["/status có Health Bar: 💀 SL bên trái, 🏁 TP bên phải; lỗ thì thanh đỏ chạy từ entry về SL, lãi thì thanh xanh chạy về TP",
@@ -500,6 +502,26 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             if st:
                 want = ins["maxlev"] if st[0] == "max" else min(st[1], ins["maxlev"])
                 lev = max(lev, int(want) if want == int(want) else want)
+            # Da co position cung coin: Bybit ap don bay cho CA position va khong cho HA don bay khi so du
+            # khong du ky quy cho phan cu ("ab not enough for new leverage") -> tinh tren tong position, khong ha.
+            ex = next((p for p in (status.get(c.name) or {}).get("positions") or [] if p["symbol"] == symbol), None)
+            if ex:
+                try:
+                    cur = float(ex.get("lev") or 0) or lev_cache.get((c.name, symbol)) or 1.0
+                except (TypeError, ValueError):
+                    cur = lev_cache.get((c.name, symbol)) or 1.0
+                if ex["side"] != side:             # lenh nguoc chieu = giam/dao position: giu nguyen don bay
+                    lev, real, note = cur, notional, ""
+                else:
+                    ex_val = float(ex["size"]) * ex["avg"]
+                    room = avail * SAFETY + ex_val / cur          # ky quy co the dung cho ca position
+                    need = math.ceil((ex_val + notional) / room) if room > 0 else ins["maxlev"]
+                    lev = max(cur, min(max(need, 1), ins["maxlev"]))
+                    lev = int(lev) if lev == int(lev) else lev
+                    real = min(notional, max(0.0, room * lev - ex_val))
+                    note = "" if real >= notional - 0.01 else f" (giảm size còn {real:.0f} USDT vì max đòn bẩy x{lev:g})"
+                    if lev != cur:
+                        note += f" | cả position đổi x{cur:g} → x{lev:g}"
         # Dat don bay SONG SONG voi lenh (khong cho) -> tiet kiem 1 luot di-ve toi Bybit.
         # Neu da biet don bay dang dung thi bo qua luon.
         lev_task = None
@@ -545,7 +567,10 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             extra = f" | đặt đòn bẩy x{lev:g} lỗi: {lev_err}" if lev_err else ""
             return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}{extra}"
         if lev_err:
-            note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
+            old = lev_cache.get((c.name, symbol))
+            note += f" ⚠️ không đổi được đòn bẩy sang x{lev:g} ({lev_err}) — lệnh vào ở đòn bẩy cũ"
+            if old:
+                lev = old
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"], side))
         val = float(qty) * price       # gia tri thuc sau khi lam tron so luong theo buoc cua san
         return f"✅ {c.name}: {side_vn(side)} {symbol} ~{val:.2f} USDT, x{lev:g}{note}"

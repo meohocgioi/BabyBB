@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.14.2"
+VERSION = "1.15.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.15.0", ["Lệnh mới /lev auto — tool tự chọn đòn bẩy thấp nhất vừa đủ để vào đúng size, bạn chỉ cần quan tâm size"]),
     ("1.14.2", ["/status bỏ dòng Chế độ · Đòn bẩy cho gọn"]),
     ("1.14.1", ["Lệnh bị từ chối vì size nhỏ hơn mức tối thiểu: tin lỗi có nút Open Minimum Order — mở lại đúng lệnh đó (coin, Long/Short, TP, SL) với size tối thiểu",
                 "Size tối thiểu tính cả bước khối lượng của sàn + 3% dự phòng giá chạy, nên lệnh theo gợi ý không còn bị từ chối"]),
@@ -1163,7 +1164,7 @@ def allin_setting():
 
 def lev_label():
     a = allin_setting()
-    return "chưa đặt" if not a else ("max của coin" if a[0] == "max" else f"x{a[1]:g}")
+    return "auto (tự chọn theo size)" if not a else ("max của coin" if a[0] == "max" else f"x{a[1]:g}")
 
 
 ALLIN_RE = re.compile(r"^/(?:buyall|sellall)(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
@@ -1186,7 +1187,8 @@ HELP_ITEMS = [
     ("/sell #coin size tp sl", "Mở Short ngay trên tất cả acc (ngược với /buy). TP khi giá giảm tp%, SL khi giá tăng sl%. Vd: /sell #eth 1000 10 2"),
     ("/buyall #coin tp sl", "Mở Long toàn bộ vốn mỗi acc với đòn bẩy max của coin — size lớn nhất có thể. Vd: /buyall #evaa 10 2"),
     ("/sellall #coin tp sl", "Mở Short toàn bộ vốn mỗi acc với đòn bẩy max của coin (ngược với /buyall). Vd: /sellall #evaa 10 2"),
-    ("/lev N", "Đặt đòn bẩy cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
+    ("/lev auto", "Tool tự chọn đòn bẩy thấp nhất vừa đủ để vào đúng size (khuyên dùng)"),
+    ("/lev N", "Đặt đòn bẩy cố định cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
     ("/help", "Hiện danh sách lệnh này"),
@@ -2289,20 +2291,27 @@ async def handle_update(u):
             elif cmd == "/lev":
                 arg = (m.get("text") or "").split()[1:2]
                 arg = arg[0].lower().lstrip("x").replace(",", ".") if arg else ""
-                ok = arg == "max"
+                ok = arg in ("max", "auto")
                 if not ok:
                     try:
                         ok = 1 <= float(arg) <= 200
                     except ValueError:
                         ok = False
-                if ok:
+                if ok and arg == "auto":
+                    cfg["allin_lev"] = ""; save_cfg()
+                    log("⚙️ Đòn bẩy: auto (từ Telegram)")
+                    reply = ("⚙️ Đòn bẩy: AUTO cho tất cả sub account.\n"
+                             "Với /buy, /sell và lệnh từ kênh, tool tự chọn đòn bẩy thấp nhất vừa đủ để mở đúng size bạn gõ "
+                             "(vd số dư 100 USDT, size 1000 → khoảng x11, vì tool chừa một ít vốn cho phí). Size lớn hơn mức coin cho phép thì tool dùng max của coin và báo size thực tế.\n"
+                             "/buyall, /sellall vẫn luôn dùng max của coin.")
+                elif ok:
                     cfg["allin_lev"] = arg; save_cfg()
                     log(f"⚙️ Đòn bẩy: {lev_label()} (từ Telegram)")
                     reply = (f"⚙️ Đã đặt đòn bẩy: {lev_label()} cho tất cả sub account.\n"
                              "Áp dụng cho /buy, /sell và lệnh từ kênh (/buyall, /sellall luôn dùng max của coin). Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó; "
                              "size cần đòn bẩy cao hơn thì tool tự nâng lên.")
                 else:
-                    reply = f"Đòn bẩy hiện tại: {lev_label()}\nDùng: /lev 10 (từ 1 đến 200) hoặc /lev max"
+                    reply = f"Đòn bẩy hiện tại: {lev_label()}\nDùng: /lev auto (tự chọn theo size), /lev 10 (từ 1 đến 200) hoặc /lev max"
             elif cmd in ("/buyall", "/sellall"):
                 a = parse_allin(m.get("text") or "")
                 if not a and cmd == "/buyall":
@@ -2721,7 +2730,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
     <label>Bot Token (từ @BotFather)</label><input id="bot_token" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
     <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Rich message (bảng biểu)</option><option value="0">Chữ thường</option></select>
-    <label>Đòn bẩy cho mọi lệnh (số, hoặc max = max của coin; trống = tự tính thấp nhất)</label><input id="allin_lev" placeholder="chưa đặt">
+    <label>Đòn bẩy cho mọi lệnh (số, hoặc max = max của coin; trống = auto: tự tính thấp nhất vừa đủ cho size)</label><input id="allin_lev" placeholder="auto">
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /buyall #coin tp sl · /sellall #coin tp sl · /lev N · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 

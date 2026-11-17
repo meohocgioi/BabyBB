@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.13.1", ["Thêm nút Remove TP (dưới Edit TP) và Remove SL (dưới Edit SL) — gỡ TP/SL của mọi position trên mọi acc"]),
     ("1.13.0", ["Nút dưới /status: Close Partial Position đổi thành Close Order — bấm mới bung hàng 10/30/50/70/100%",
                 "Nút mới Edit TP & SL → Edit TP / Edit SL → 1/3/5/7/10% tính từ giá entry, áp dụng cho mọi position trên mọi acc"]),
     ("1.12.2", ["/status còn 3 cột: PnL % nằm dưới tên acc (chỉ hiện khi có position)",
@@ -1274,6 +1275,7 @@ def live_kb():
                      {"text": mark(menu == "sl", "Edit SL"), "callback_data": "m:sl"}])
         if menu in ("tp", "sl"):
             rows.append([{"text": f"{p}%", "callback_data": f"{menu}:{p}"} for p in TPSL_PCTS])
+            rows.append([{"text": f"Remove {menu.upper()}", "callback_data": f"{menu}:0"}])     # 0 = go TP/SL
     return {"inline_keyboard": rows}
 
 
@@ -1281,7 +1283,8 @@ TPSL_PCTS = (1, 3, 5, 7, 10)       # % tinh tu gia entry cua tung position
 
 
 async def set_tpsl_all(kind, pct):
-    """Dat lai TP (kind='tp') hoac SL (kind='sl') = entry ± pct% cho moi position tren moi acc. -> ban tom tat"""
+    """Dat lai TP (kind='tp') hoac SL (kind='sl') = entry ± pct% cho moi position tren moi acc; pct = 0 -> go bo.
+    -> ban tom tat"""
     busy["n"] += 1
     try:
         async def one(c):
@@ -1301,12 +1304,13 @@ async def set_tpsl_all(kind, pct):
                     d = 1 if p["side"] == "Buy" else -1          # Long: TP tren, SL duoi. Short: nguoc lai
                     if kind == "sl":
                         d = -d
-                    px = fmt(round_tick(D(str(p["avg"])) * (1 + d * D(pct) / 100), ins["tick"]))
+                    px = fmt(round_tick(D(str(p["avg"])) * (1 + d * D(pct) / 100), ins["tick"])) if pct else "0"
                     body = {"category": "linear", "symbol": sym, "tpslMode": "Full", "positionIdx": p["idx"],
                             "takeProfit" if kind == "tp" else "stopLoss": px}
                     r = await c.req("POST", "/v5/position/trading-stop", body)
                     if r.get("retCode") in (0, 34040):           # 34040 = gia tri khong doi
-                        out.append(f"✅ {c.name}: {side_vn(p['side'])} {coin_of(sym)} — {kind.upper()} {num(px)}")
+                        what = f"{kind.upper()} {num(px)}" if pct else f"đã gỡ {kind.upper()}"
+                        out.append(f"✅ {c.name}: {side_vn(p['side'])} {coin_of(sym)} — {what}")
                     else:
                         out.append(f"❌ {c.name}: {coin_of(sym)} — {r.get('retMsg')}")
             except Exception as e:
@@ -1315,10 +1319,10 @@ async def set_tpsl_all(kind, pct):
         res = [x for xs in await asyncio.gather(*(one(c) for c in clients)) for x in xs]
     finally:
         busy["n"] -= 1
-    head = f"🎯 {kind.upper()} = {pct}% từ entry"
+    head = f"🎯 {kind.upper()} = {pct}% từ entry" if pct else f"🧹 Remove {kind.upper()}"
     if not res:
         res = ["Không có position nào đang mở."]
-    elif any(x.startswith("❌") for x in res):
+    elif pct and any(x.startswith("❌") for x in res):
         res.append("💡 Bybit từ chối khi giá hiện tại đã vượt qua mức muốn đặt (vd TP Long phải cao hơn giá hiện tại, "
                    "SL Long phải thấp hơn giá hiện tại).")
     for line in [head] + res:
@@ -1367,10 +1371,14 @@ async def handle_callback(cq):
         return await answer()
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
-        if not val.isdigit() or int(val) not in TPSL_PCTS:
+        if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):
             return await answer()
-        await answer(f"Đang đặt {kind.upper()} {val}% từ entry…")
-        log(f"🎯 Đặt {kind.upper()} {val}% từ entry (nút dưới /status)")
+        if int(val):
+            await answer(f"Đang đặt {kind.upper()} {val}% từ entry…")
+            log(f"🎯 Đặt {kind.upper()} {val}% từ entry (nút dưới /status)")
+        else:
+            await answer(f"Đang gỡ {kind.upper()}…")
+            log(f"🧹 Gỡ {kind.upper()} (nút dưới /status)")
         msg = await set_tpsl_all(kind, int(val))
         live["menu"] = "tpsl"
         live.update(png_sym=None)              # ve lai chart voi vach TP/SL moi

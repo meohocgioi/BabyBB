@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.12.2"
+VERSION = "1.13.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.13.0", ["Nút dưới /status: Close Partial Position đổi thành Close Order — bấm mới bung hàng 10/30/50/70/100%",
+                "Nút mới Edit TP & SL → Edit TP / Edit SL → 1/3/5/7/10% tính từ giá entry, áp dụng cho mọi position trên mọi acc"]),
     ("1.12.2", ["/status còn 3 cột: PnL % nằm dưới tên acc (chỉ hiện khi có position)",
                 "Position ghi gọn: Long EVAA x5 · Size 300 (làm tròn, bỏ chữ USDT)", "Dòng Total fee đổi tên thành Fee"]),
     ("1.12.1", ["/status gọn hơn: bỏ cột Phí, thêm dòng Total fee ở cuối bảng",
@@ -1261,9 +1263,67 @@ def live_kb():
             [{"text": f"⚠️ Đóng {cf[0]}% TẤT CẢ position?", "callback_data": "noop"}],
             [{"text": f"✅ Xác nhận đóng {cf[0]}%", "callback_data": f"ok:{cf[0]}"},
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
-    return {"inline_keyboard": [
-        [{"text": "Close Partial Position", "callback_data": "noop"}],
-        [{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS]]}
+    menu = live.get("menu")
+    mark = lambda on, t: ("▾ " if on else "") + t
+    rows = [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
+             {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
+    if menu == "close":
+        rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
+    elif menu in ("tpsl", "tp", "sl"):
+        rows.append([{"text": mark(menu == "tp", "Edit TP"), "callback_data": "m:tp"},
+                     {"text": mark(menu == "sl", "Edit SL"), "callback_data": "m:sl"}])
+        if menu in ("tp", "sl"):
+            rows.append([{"text": f"{p}%", "callback_data": f"{menu}:{p}"} for p in TPSL_PCTS])
+    return {"inline_keyboard": rows}
+
+
+TPSL_PCTS = (1, 3, 5, 7, 10)       # % tinh tu gia entry cua tung position
+
+
+async def set_tpsl_all(kind, pct):
+    """Dat lai TP (kind='tp') hoac SL (kind='sl') = entry ± pct% cho moi position tren moi acc. -> ban tom tat"""
+    busy["n"] += 1
+    try:
+        async def one(c):
+            out = []
+            try:
+                for p in await c.positions():
+                    sym = p["symbol"]
+                    if sym not in instruments:
+                        try:
+                            await load_instruments(sym)
+                        except Exception:
+                            pass
+                    ins = instruments.get(sym)
+                    if not ins or not p["avg"]:
+                        out.append(f"❌ {c.name}: {coin_of(sym)} — không lấy được thông tin hợp đồng")
+                        continue
+                    d = 1 if p["side"] == "Buy" else -1          # Long: TP tren, SL duoi. Short: nguoc lai
+                    if kind == "sl":
+                        d = -d
+                    px = fmt(round_tick(D(str(p["avg"])) * (1 + d * D(pct) / 100), ins["tick"]))
+                    body = {"category": "linear", "symbol": sym, "tpslMode": "Full", "positionIdx": p["idx"],
+                            "takeProfit" if kind == "tp" else "stopLoss": px}
+                    r = await c.req("POST", "/v5/position/trading-stop", body)
+                    if r.get("retCode") in (0, 34040):           # 34040 = gia tri khong doi
+                        out.append(f"✅ {c.name}: {side_vn(p['side'])} {coin_of(sym)} — {kind.upper()} {num(px)}")
+                    else:
+                        out.append(f"❌ {c.name}: {coin_of(sym)} — {r.get('retMsg')}")
+            except Exception as e:
+                out.append(f"❌ {c.name}: {str(e)[:100]}")
+            return out
+        res = [x for xs in await asyncio.gather(*(one(c) for c in clients)) for x in xs]
+    finally:
+        busy["n"] -= 1
+    head = f"🎯 {kind.upper()} = {pct}% từ entry"
+    if not res:
+        res = ["Không có position nào đang mở."]
+    elif any(x.startswith("❌") for x in res):
+        res.append("💡 Bybit từ chối khi giá hiện tại đã vượt qua mức muốn đặt (vd TP Long phải cao hơn giá hiện tại, "
+                   "SL Long phải thấp hơn giá hiện tại).")
+    for line in [head] + res:
+        log(line)
+    return head + "\n" + "\n".join(res)
 
 
 def live_refresh_now():
@@ -1292,6 +1352,31 @@ async def handle_callback(cq):
         live["confirm"] = None
         live_refresh_now()
         return await answer("Đã huỷ")
+    if data.startswith("m:"):                  # mo / dong cac hang nut phu
+        want, cur = data[2:], live.get("menu")
+        if want not in ("close", "tpsl", "tp", "sl"):
+            return await answer()
+        if want == "tpsl":
+            live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
+        elif want == "close":
+            live["menu"] = None if cur == "close" else "close"
+        else:
+            live["menu"] = "tpsl" if cur == want else want
+        live["confirm"] = None
+        live_refresh_now()
+        return await answer()
+    if data.startswith(("tp:", "sl:")):
+        kind, _, val = data.partition(":")
+        if not val.isdigit() or int(val) not in TPSL_PCTS:
+            return await answer()
+        await answer(f"Đang đặt {kind.upper()} {val}% từ entry…")
+        log(f"🎯 Đặt {kind.upper()} {val}% từ entry (nút dưới /status)")
+        msg = await set_tpsl_all(kind, int(val))
+        live["menu"] = "tpsl"
+        live.update(png_sym=None)              # ve lai chart voi vach TP/SL moi
+        live_refresh_now()
+        send(live["chat"] or cfg["bot_owner_id"], msg)
+        return
     kind, _, val = data.partition(":")
     try:
         pct = int(val)
@@ -1310,6 +1395,7 @@ async def handle_callback(cq):
             live_refresh_now()
             return await answer("Hết thời gian xác nhận — bấm lại % muốn đóng", True)
         live["confirm"] = None
+        live["menu"] = None
         log(f"✂️ Đóng {pct}% position (nút dưới /status)")
         await answer(f"Đang đóng {pct}%…")
         if pct == 100:
@@ -1348,6 +1434,7 @@ async def start_live(chat):
     if old[1]:                         # danh dau tin cu la da ngung
         asyncio.create_task(live_edit(*old, final=True))
     live["confirm"] = None
+    live["menu"] = None
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
     if mid:
         live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, chart_off=False,

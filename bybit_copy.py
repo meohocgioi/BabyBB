@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.12.1"
+VERSION = "1.12.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.12.2", ["/status còn 3 cột: PnL % nằm dưới tên acc (chỉ hiện khi có position)",
+                "Position ghi gọn: Long EVAA x5 · Size 300 (làm tròn, bỏ chữ USDT)", "Dòng Total fee đổi tên thành Fee"]),
     ("1.12.1", ["/status gọn hơn: bỏ cột Phí, thêm dòng Total fee ở cuối bảng",
                 "Cột PnL USDT đổi tên thành uPnL; chấm 🟢/🔴 nằm cùng dòng với PnL %"]),
     ("1.12.0", ["/status có chart nến 1 phút (60 nến gần nhất) của coin đang mở, kèm vạch ENTRY / TP / SL",
@@ -728,8 +730,12 @@ def r_foot(text):
 
 POS_HEAD = ["Acc", "Position", "Phí", "PnL %", "PnL USDT"]
 POS_ALIGN = [None, None, "right", "right", "right"]
-STATUS_HEAD = ["Acc", "Position", "PnL %", "uPnL"]         # /status: khong co cot phi, tong phi nam o dong cuoi
-STATUS_ALIGN = [None, None, "right", "right"]
+STATUS_HEAD = ["Acc", "Position", "uPnL"]       # /status: PnL % nam duoi ten acc, tong phi o dong cuoi
+STATUS_ALIGN = [None, None, "right"]
+
+
+def coin_of(symbol):
+    return symbol[:-4] if symbol.endswith("USDT") and len(symbol) > 4 else symbol
 
 
 
@@ -945,7 +951,7 @@ def status_text():
     if any((status.get(c.name) or {}).get("positions") for c in clients):
         lines.append(f"Tổng uPnL: {dot(tot)} {tot:+.2f} USDT")
         fee = sum((p.get("fee", 0) or 0) for c in clients for p in (status.get(c.name) or {}).get("positions") or [])
-        lines.append(f"Total fee: {fee:.2f} USDT")
+        lines.append(f"Fee: {fee:.2f} USDT")
     return "\n".join(lines)
 
 
@@ -965,21 +971,22 @@ def status_blocks(title=None, stamp=None):
     for c in clients:
         st = status.get(c.name) or {}
         if st.get("error"):
-            R.append([B(c.name), f"⚠️ {st['error']}", "", ""])
+            R.append([B(c.name), f"⚠️ {st['error']}", ""])
         elif not st.get("positions"):
             bal = f"No Position\nAvai {st['balance']:.2f} USDT" if st.get("balance") is not None else "No Position"
-            R.append([B(c.name), bal, "", ""])
+            R.append([B(c.name), bal, ""])
         else:
             for p in st["positions"]:
                 has = True
                 tot += p["pnl"]
                 fee += p.get("fee", 0) or 0
-                R.append([B(c.name), [B(f"{side_vn(p['side'])} {p['symbol']}"),
-                                      f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.2f} USDT\nEntry {num(p['avg'])}"],
-                          f"{dot(p['pnl'])}\u00a0{p['pct']:+.2f}%", B(f"{p['pnl']:+.2f}")])
+                R.append([[B(c.name), f"\n{dot(p['pnl'])}\u00a0{p['pct']:+.2f}%"],
+                          [B(f"{side_vn(p['side'])} {coin_of(p['symbol'])}"),
+                           f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.0f}\nEntry {num(p['avg'])}"],
+                          B(f"{p['pnl']:+.2f}")])
     if has:
-        R.append([B("Tổng"), "", dot(tot), B(f"{tot:+.2f}")])
-        R.append([B("Total fee"), "", "", B(f"{fee:.2f}")])
+        R.append([B("Tổng"), "", B(f"{dot(tot)}\u00a0{tot:+.2f}")])
+        R.append([B("Fee"), "", B(f"{fee:.2f}")])
     if R:
         blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     else:

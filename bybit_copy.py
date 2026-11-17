@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.21.2"
+VERSION = "1.21.3"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.21.3", ["Lệnh /debug: xem tình trạng tự cập nhật của /status (lần sửa gần nhất, lỗi Telegram trả về, thời gian chờ) để tìm lỗi"]),
     ("1.21.2", ["/status: chữ \"5 acc\" trong ô bảng tổng giờ là nút bấm — bấm để mở / đóng bảng từng acc"]),
     ("1.21.1", ["/status: bỏ mục thu gọn và nút Chi tiết từng acc; thay bằng nút \"▸ 5 acc\" ngay dưới bảng tổng — bấm để mở / đóng bảng từng acc, không còn tự thu lại"]),
     ("1.21.0", ["Position bị đóng ngoài tool (dính TP, SL, thanh lý, hoặc bạn đóng tay trên Bybit): bot tự báo lý do + bảng PnL đã gồm phí từng acc",
@@ -1732,6 +1733,29 @@ async def kb_now():
             live_refresh_now()
 
 
+def live_note(r, how):
+    """Nhat ky 30 lan sua tin /status gan nhat (cho lenh /debug)."""
+    d = live.setdefault("log", deque(maxlen=30))
+    d.append((time.time(), how, bool(r.get("ok")), str(r.get("description") or "")[:90]))
+
+
+def debug_text():
+    now = time.time()
+    L = [f"🔧 Debug /status — v{VERSION}",
+         f"Tin đang tự cập nhật: {'có (#' + str(live['mid']) + ')' if live.get('mid') else 'KHÔNG'}",
+         f"Lần sửa thành công gần nhất: {now - live.get('t', 0):.0f}s trước",
+         f"Đang chờ do Telegram giới hạn: {max(0, live.get('wait', 0) - now):.0f}s",
+         f"Ảnh tạm ẩn: {max(0, live.get('photo_off_until', 0) - now):.0f}s (lỗi ảnh liên tiếp: {live.get('photo_fail', 0)})",
+         f"Đang vào/đóng lệnh (busy): {busy['n']}",
+         "Số liệu Bybit: " + ", ".join(f"{c.name} {now - (status.get(c.name) or {}).get('t', 0):.0f}s" for c in clients)]
+    log_ = list(live.get("log") or [])[-8:]
+    if log_:
+        L.append("8 lần sửa tin gần nhất:")
+        for t, how, ok, desc in log_:
+            L.append(f"  {datetime.fromtimestamp(t).strftime('%H:%M:%S')} {how}: {'OK' if ok else 'LỖI ' + desc}")
+    return "\n".join(L)
+
+
 async def edit_now():
     """Sua ca tin /status ngay (dung khi doi Health Bar / 1m Candle), khong cho vong cap nhat."""
     if not live["mid"]:
@@ -1739,6 +1763,7 @@ async def edit_now():
     async with live_lock():
         sig = live_sig()
         r = await live_edit(live["chat"], live["mid"], live["rich"])
+        live_note(r, "nút")
         if r.get("ok") or "not modified" in str(r.get("description")):
             live.update(sig=sig, t=time.time())
         else:
@@ -2050,11 +2075,13 @@ async def live_loop():
                     sig = live_sig()
                 r = await live_edit(live["chat"], live["mid"], live["rich"])
             desc = str(r.get("description") or "")
+            live_note(r, "auto")
             if r.get("ok") or "not modified" in desc:
                 live.update(sig=sig, t=time.time())
             elif "Too Many Requests" in desc or "retry after" in desc.lower():
                 wait = float((r.get("parameters") or {}).get("retry_after") or 10)
                 live["wait"] = time.time() + wait + 1
+                log(f"/status: Telegram giới hạn tốc độ sửa tin — chờ {wait:.0f}s")
             elif _net_err(desc):
                 live["wait"] = time.time() + 5
             else:                      # tin da bi xoa / khong sua duoc nua
@@ -3036,6 +3063,10 @@ async def handle_update(u):
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], cmd, allin=("max",),
                                         side="Buy" if cmd == "/buyall" else "Sell")
                     return
+            elif cmd == "/debug":
+                rm, _ = await _send(chat, debug_text())
+                track_new("debug", chat, rm, umid)
+                return
             elif cmd == "/per":
                 asyncio.create_task(per_send(chat, "d", umid))
                 return

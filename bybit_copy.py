@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.6.1", ["Bảng /status gọn hơn: No Position, Avai, Last Update; bỏ dòng chú thích phí",
+               "Realized PnL: dòng trên đổi tên thành PnL (đã gồm phí)"]),
     ("1.6.0", ["Tin /status có nút đóng một phần position: 10% / 30% / 50% / 70% / 100% (bấm xong phải Xác nhận)",
                "Sau khi đóng, đầu tin /status hiện Realized PnL: Profit or Loss và Total fee"]),
     ("1.5.2", ["Khi lệnh lỗi, bot thêm dòng 💡 gợi ý cách sửa: size tối thiểu, size tối đa theo số dư, lỗi API key…"]),
@@ -787,8 +789,8 @@ def realized_lines():
     rz = cfg.get("realized") or {}
     if not rz.get("n"):
         return []
-    est = " (ước tính, chưa trừ phí)" if rz.get("est") else " (đã trừ phí)"
-    return ["Realized PnL", f"Profit or Loss = {dot(rz['pnl'])} {rz['pnl']:+.4f} USDT{est}",
+    lab = "PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)"
+    return ["Realized PnL", f"{lab} = {dot(rz['pnl'])} {rz['pnl']:+.4f} USDT",
             f"Total fee = {rz['fee']:.4f} USDT"]
 
 
@@ -874,11 +876,11 @@ def status_text():
     tot = 0.0
     for c in clients:
         st = status.get(c.name) or {}
-        bal = f" (khả dụng {st['balance']:.2f} USDT)" if st.get("balance") is not None else ""
+        bal = f" | Avai {st['balance']:.2f} USDT" if st.get("balance") is not None else ""
         if st.get("error"):
             lines.append(f"{c.name}: ⚠️ {st['error']}")
         elif not st.get("positions"):
-            lines.append(f"{c.name}: không có position{bal}")
+            lines.append(f"{c.name}: No Position{bal}")
         else:
             for p in st["positions"]:
                 tot += p["pnl"]
@@ -899,7 +901,7 @@ def status_blocks(title=None, stamp=None):
     if rl:
         rz = cfg["realized"]
         blocks.append(r_table(["Realized PnL", "USDT"],
-                              [["Profit or Loss" + (" (ước tính)" if rz.get("est") else " (đã trừ phí)"),
+                              [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
                                 B(f"{dot(rz['pnl'])} {rz['pnl']:+.4f}")],
                                ["Total fee", B(f"{rz['fee']:.4f}")]], [None, "right"]))
     R, tot, has = [], 0.0, False
@@ -908,7 +910,7 @@ def status_blocks(title=None, stamp=None):
         if st.get("error"):
             R.append([B(c.name), f"⚠️ {st['error']}", "", "", ""])
         elif not st.get("positions"):
-            bal = f"Không có position\nKhả dụng {st['balance']:.2f} USDT" if st.get("balance") is not None else "Không có position"
+            bal = f"No Position\nAvai {st['balance']:.2f} USDT" if st.get("balance") is not None else "No Position"
             R.append([B(c.name), bal, "", "", ""])
         else:
             for p in st["positions"]:
@@ -921,7 +923,6 @@ def status_blocks(title=None, stamp=None):
         R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.4f}")])
     if R:
         blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
-        blocks.append(r_foot("Phí = phí đã trả của position đang mở. Đơn vị: USDT."))
     else:
         blocks.append(r_par("Chưa cài sub account nào."))
     if stamp:
@@ -1237,7 +1238,7 @@ LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
 def live_stamp():
-    return f"🔄 Tự cập nhật · lần cuối {datetime.now().strftime('%H:%M:%S')}"
+    return f"Last Update: {datetime.now().strftime('%H:%M:%S')}"
 
 
 def live_stop(why=""):

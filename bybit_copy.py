@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.21.1"
+VERSION = "1.21.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.21.2", ["/status: chữ \"5 acc\" trong ô bảng tổng giờ là nút bấm — bấm để mở / đóng bảng từng acc"]),
     ("1.21.1", ["/status: bỏ mục thu gọn và nút Chi tiết từng acc; thay bằng nút \"▸ 5 acc\" ngay dưới bảng tổng — bấm để mở / đóng bảng từng acc, không còn tự thu lại"]),
     ("1.21.0", ["Position bị đóng ngoài tool (dính TP, SL, thanh lý, hoặc bạn đóng tay trên Bybit): bot tự báo lý do + bảng PnL đã gồm phí từng acc",
                 "Position History (/per) ghi lý do đóng của từng lần: 🏁 TP / 💀 SL / ☠️ Thanh lý / ✋ Đóng tay / 🤖 Tool"]),
@@ -1308,14 +1309,13 @@ def status_blocks(title=None, stamp=None):
             levs = sorted({float(x) for x in g["lev"]})
             lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
             pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
-            S.append([[B("Tổng" if len(status_groups()) == 1 else coin_of(sym)), f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
+            first = acc_cell(len(g["accs"])) if botst.get("rich_buttons") is not False else B(f"{len(g['accs'])} acc")
+            S.append([[first, f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
                       [B(f"{side_vn(sd)} {coin_of(sym)}"),
                        f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
                       B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
         S.append([B("Fee"), "", B(f"{fee:.2f}")])
         blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
-        if botst.get("rich_buttons") is not False:      # nut "5 acc" ngay duoi bang tong (cung kieu nut 1m Candle / Health Bar)
-            blocks.append({"type": "buttons", "buttons": [acc_button(n_acc)]})
         if live.get("detail"):
             blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     elif R:
@@ -1330,6 +1330,11 @@ def status_blocks(title=None, stamp=None):
 def acc_button(n=None):
     n = n if n is not None else sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
     return {"text": ("▾ " if live.get("detail") else "▸ ") + f"{n} acc", "callback_data": "dt"}
+
+
+def acc_cell(n):
+    """Chu "5 acc" trong o bang la 1 nut bam (rich text kieu button) -> mo / dong bang tung acc."""
+    return {"type": "button", "button": acc_button(n)}
 
 
 def status_groups():
@@ -1598,6 +1603,12 @@ async def _send_rich(chat, text, blocks, kb=None, rebuild=None):
                 botst["rich"] = True
                 return (r.get("result") or {}).get("message_id"), True
             desc = str(r.get("description"))
+            if rebuild and "button" in desc.lower() and botst.get("rich_buttons") is not False:
+                botst["rich_buttons"] = False
+                log(f"Telegram không nhận nút trong tin ({desc[:100]}) — chuyển nút xuống dưới tin")
+                blocks, kb2 = rebuild()
+                extra = {"reply_markup": kb2} if kb2 else {}
+                continue
             if rebuild and "detail" in desc.lower() and botst.get("rich_details") is not False:
                 botst["rich_details"] = False
                 log(f"Telegram không nhận khối thu gọn ({desc[:100]}) — gửi bảng đầy đủ")
@@ -1994,6 +2005,14 @@ async def live_edit(chat, mid, rich, final=False):
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
         r = await bot_api("editMessageText", _quiet=True, **p)
         desc = str(r.get("description") or "")
+        if not r.get("ok") and "button" in desc.lower() and botst.get("rich_buttons") is not False:
+            botst["rich_buttons"] = False
+            log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển nút xuống dưới tin")
+            p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
+            if not final:
+                p["reply_markup"] = live_kb() or {"inline_keyboard": []}
+            r = await bot_api("editMessageText", _quiet=True, **p)
+            desc = str(r.get("description") or "")
         if not r.get("ok") and "detail" in desc.lower() and botst.get("rich_details") is not False:
             botst["rich_details"] = False
             log(f"/status: Telegram không nhận khối thu gọn ({desc[:100]}) — hiện bảng đầy đủ")

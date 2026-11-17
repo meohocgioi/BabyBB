@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.20.0"
+VERSION = "1.21.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.21.0", ["Position bị đóng ngoài tool (dính TP, SL, thanh lý, hoặc bạn đóng tay trên Bybit): bot tự báo lý do + bảng PnL đã gồm phí từng acc",
+                "Position History (/per) ghi lý do đóng của từng lần: 🏁 TP / 💀 SL / ☠️ Thanh lý / ✋ Đóng tay / 🤖 Tool"]),
     ("1.20.0", ["/status gọn: 1 dòng tổng hợp cả 5 acc (tổng size, entry trung bình, PnL % trung bình, tổng uPnL)",
                 "Chi tiết từng acc nằm trong mục thu gọn — bấm \"▸ Chi tiết từng acc\" để mở / đóng"]),
     ("1.19.0", ["Chat gọn hơn: gõ /status, /per, /update, /start, /stop, /help thì tin cũ của chính lệnh đó (cả tin bạn gõ và tin bot trả lời) tự bị xoá, chỉ giữ bản mới nhất",
@@ -755,6 +757,73 @@ async def cc_close(chat, amount):
         log(f"⚠️ Không gửi được bảng /status sau khi đóng: {type(e).__name__}: {str(e)[:100]}")
 
 
+async def close_watch_loop():
+    """Position giam / bien mat -> hoi Bybit ly do (TP / SL / thanh ly / dong tay) va PnL da gom phi, bao qua bot.
+    Lenh do chinh tool dong (ma bb...) da duoc bao roi -> bo qua."""
+    pending, seen = [], set()
+    while True:
+        await asyncio.sleep(1)
+        try:
+            if close_events:
+                pending += close_events
+                close_events.clear()
+            if not pending or time.time() - min(e["t"] for e in pending) < 3:
+                continue                       # cho 3s de gom cac acc cung dong (TP/SL kich cung luc)
+            batch, pending = pending, []
+            if not (cfg["bot_token"] and cfg["bot_owner_id"]):
+                continue
+            accs = {e["c"].name: e["c"] for e in batch}
+            syms = {e["sym"] for e in batch}
+            start = int((min(e["t"] for e in batch) - 180) * 1000) + time_offset
+
+            async def one(c):
+                r = await c.req("GET", "/v5/position/closed-pnl", {"category": "linear", "startTime": str(start), "limit": "100"})
+                recs = [x for x in ((r.get("result") or {}).get("list") or [])
+                        if x.get("symbol") in syms and (c.name, x.get("orderId")) not in seen]
+                why = await order_reasons(c, [x.get("orderId") for x in recs], start - 60000) if recs else {}
+                return c, recs, why
+            got = []
+            for k in range(4):                 # Bybit can vai giay moi ghi nhan xong
+                got = await asyncio.gather(*(one(c) for c in accs.values()))
+                if all(recs for _, recs, _ in got) or k == 3:
+                    break
+                await asyncio.sleep(2)
+            rows, reasons = [], set()
+            for c, recs, why in got:
+                agg = {}
+                for x in recs:
+                    seen.add((c.name, x.get("orderId")))
+                    w = why.get(x.get("orderId"), "?")
+                    if w == "🤖 Tool":
+                        continue               # tool tu dong -> da co tin bao rieng
+                    a = agg.setdefault(x["symbol"], {"q": 0.0, "ev": 0.0, "xv": 0.0, "pnl": 0.0, "fee": 0.0,
+                                                     "side": "Buy" if x.get("side") == "Sell" else "Sell",
+                                                     "lev": x.get("leverage") or "?", "why": set()})
+                    a["q"] += float(x.get("closedSize") or x.get("qty") or 0)
+                    a["ev"] += float(x.get("cumEntryValue") or 0); a["xv"] += float(x.get("cumExitValue") or 0)
+                    a["pnl"] += float(x.get("closedPnl") or 0)
+                    a["fee"] += float(x.get("openFee") or 0) + float(x.get("closeFee") or 0)
+                    a["why"].add(w)
+                for sym, a in agg.items():
+                    reasons |= a["why"]
+                    rows.append({"acc": c.name, "symbol": sym, "side": a["side"], "size": fmt(a["q"]), "usd": a["ev"],
+                                 "lev": a["lev"], "entry": a["ev"] / a["q"] if a["q"] else 0,
+                                 "exit": a["xv"] / a["q"] if a["q"] else None, "fee": a["fee"], "pnl": a["pnl"],
+                                 "pct": a["pnl"] / a["ev"] * 100 if a["ev"] else 0, "est": False, "ok": True, "err": ""})
+            if len(seen) > 5000:
+                seen.clear()
+            if not rows:
+                continue
+            add_realized(rows)
+            r0 = rows[0]
+            why = " / ".join(sorted(reasons)) or "?"
+            title = f"{why} — {side_vn(r0['side'])} {coin_of(r0['symbol'])} đã đóng ({len(rows)} acc)"
+            log(f"{title}: PnL {sum(x['pnl'] for x in rows):+.2f} USDT")
+            await _send_rich(cfg["bot_owner_id"], *close_report(rows, title=title))
+        except Exception as e:
+            log(f"close watch: {type(e).__name__}: {str(e)[:100]}")
+
+
 def short_margin(r):
     """Bybit tu choi vi khong du ky quy / so du."""
     m = str(r.get("retMsg", "")).lower()
@@ -1021,7 +1090,7 @@ async def close_one(c, pct=100, plan=None):
                 "category": "linear", "symbol": p["symbol"],
                 "side": "Sell" if p["side"] == "Buy" else "Buy",
                 "orderType": "Market", "qty": qty,
-                "reduceOnly": True, "positionIdx": p["idx"]})
+                "reduceOnly": True, "positionIdx": p["idx"], "orderLinkId": f"bbc{os.urandom(8).hex()}"})
             ok = r.get("retCode") == 0
             frac = float(qty) / float(p["size"]) if float(p["size"]) else 1
             rows.append({"acc": c.name, "symbol": p["symbol"], "side": p["side"], "size": qty,
@@ -1271,10 +1340,19 @@ def status_groups():
     return G
 
 
+close_events = []         # (acc, coin, chieu, luc) khi position giam / mat ma khong phai tool dong
+
+
 async def refresh_one(c):
     """Lay lai so du + position cua 1 acc vao bang status."""
     try:
         bal, pos = await asyncio.gather(c.balance(), c.positions())
+        prev = status.get(c.name) or {}
+        if prev.get("t") and not prev.get("error") and time.time() - prev["t"] < 60:
+            now_q = {(p["symbol"], p["side"]): float(p["size"]) for p in pos}
+            for p in prev.get("positions") or []:
+                if now_q.get((p["symbol"], p["side"]), 0.0) < float(p["size"]) * 0.999:
+                    close_events.append({"c": c, "sym": p["symbol"], "side": p["side"], "t": time.time()})
         status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time(),
                           "equity": getattr(c, "equity", None)}
         for p in pos:
@@ -2494,8 +2572,52 @@ async def fetch_closed(c, start_ms):
     return out
 
 
+_REASON = {"CreateByTakeProfit": "🏁 TP", "CreateByPartialTakeProfit": "🏁 TP", "CreateByTrailingProfit": "🏁 TP",
+           "CreateByStopLoss": "💀 SL", "CreateByPartialStopLoss": "💀 SL", "CreateByTrailingStop": "💀 Trailing SL",
+           "CreateByClosing": "✋ Đóng tay", "CreateByUser": "✋ Đóng tay", "CreateByAdminClosing": "🏛 Sàn đóng",
+           "CreateBySettle": "🏛 Sàn đóng"}
+
+
+def reason_of(create_type, link):
+    if str(link or "").startswith("bb"):
+        return "🤖 Tool"
+    ct = str(create_type or "")
+    if ct in _REASON:
+        return _REASON[ct]
+    if "liq" in ct.lower() or "takeover" in ct.lower():
+        return "☠️ Thanh lý"
+    if "adl" in ct.lower():
+        return "⚠️ ADL"
+    return ct.replace("CreateBy", "") or "?"
+
+
+async def order_reasons(c, ids, start_ms):
+    """{orderId: ly do} — TP / SL / thanh ly / dong tay / tool — tu lich su lenh (toi da 7 ngay)."""
+    want, out = {i for i in ids if i}, {}
+    if not want:
+        return out
+    now = int(time.time() * 1000) + time_offset
+    p = {"category": "linear", "startTime": str(max(start_ms, now - WEEK_MS + 60000)), "endTime": str(now), "limit": "50"}
+    for _ in range(4):
+        r = await c.req("GET", "/v5/order/history", p)
+        if r.get("retCode") != 0:
+            break
+        for o in r["result"]["list"]:
+            if o.get("orderId") in want:
+                out[o["orderId"]] = reason_of(o.get("createType"), o.get("orderLinkId"))
+        cur = r["result"].get("nextPageCursor")
+        if want <= set(out) or not cur:
+            break
+        p["cursor"] = cur
+    for oid in list(want - set(out))[:6]:              # lenh cu hon -> hoi tung lenh
+        r = await c.req("GET", "/v5/order/history", {"category": "linear", "orderId": oid})
+        for o in (r.get("result") or {}).get("list") or []:
+            out[oid] = reason_of(o.get("createType"), o.get("orderLinkId"))
+    return out
+
+
 def _rec(it):
-    return {"symbol": it["symbol"], "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
+    return {"symbol": it["symbol"], "oid": it.get("orderId"), "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
             "size": float(it.get("cumEntryValue") or 0),     # gia tri USDT cua phan da dong, tinh theo gia entry
             "pnl": float(it.get("closedPnl") or 0),
             "fee": float(it.get("openFee") or 0) + float(it.get("closeFee") or 0),
@@ -2536,7 +2658,7 @@ def per_view(kind, data, desc):
     return "\n".join(T), blocks
 
 
-def history_view(data, limit=5):
+def history_view(data, limit=5, reasons=None):
     """Gop cac lan dong cung coin, cung chieu, cung luc (trong 60s) cua moi acc thanh 1 dong."""
     recs, errs = [], []
     for name, rs in data:
@@ -2550,16 +2672,19 @@ def history_view(data, limit=5):
         g = next((g for g in groups if g["symbol"] == x["symbol"] and g["side"] == x["side"]
                   and abs(g["t"] - x["t"]) <= 60000), None)
         if g is None:
-            g = {"symbol": x["symbol"], "side": x["side"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0, "accs": set()}
+            g = {"symbol": x["symbol"], "side": x["side"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0, "accs": set(),
+                 "why": set()}
             groups.append(g)
         g["size"] += x["size"]; g["pnl"] += x["pnl"]; g["fee"] += x["fee"]; g["accs"].add(x["acc"])
+        if reasons and reasons.get(x.get("oid")):
+            g["why"].add(reasons[x["oid"]])
     groups = groups[:limit]
     title = "🧾 Position History"
     T, R = [title], []
     for g in groups:
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
         name = f"{side_vn(g['side'])} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
-        who = f"{len(g['accs'])} acc"
+        who = f"{len(g['accs'])} acc" + (" · " + " / ".join(sorted(g["why"])) if g["why"] else "")
         T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.2f} USDT | fee {g['fee']:.2f}")
         R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
     stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
@@ -2590,10 +2715,19 @@ async def per_build(kind):
     if kind == "h":
         now = int(time.time() * 1000) + time_offset
         data = await asyncio.gather(*(one(c, now - WEEK_MS) for c in clients))
-        text, blocks = history_view(data)
-        if len(blocks[1].get("cells", [])) - 1 < 5:
+        if sum(len(x[1]) for x in data if not isinstance(x[1], Exception)) < 5:
             data = await asyncio.gather(*(one(c, now - 30 * 86400 * 1000) for c in clients))   # chua du 5 -> nhin xa hon
-            text, blocks = history_view(data)
+
+        async def why(c, recs):
+            if isinstance(recs, Exception) or not recs:
+                return {}
+            recs = sorted(recs, key=lambda it: -int(it.get("updatedTime") or 0))[:12]
+            try:
+                return await order_reasons(c, [it.get("orderId") for it in recs], int(recs[-1].get("updatedTime") or 0) - 600000)
+            except Exception:
+                return {}
+        rs = await asyncio.gather(*(why(c, recs) for c, (_, recs) in zip(clients, data)))
+        text, blocks = history_view(data, reasons={k: v for d in rs for k, v in d.items()})
     else:
         start, desc = per_start(kind)
         data = await asyncio.gather(*(one(c, start) for c in clients))
@@ -3209,6 +3343,7 @@ async def main():
     asyncio.create_task(clear_pending_later())
     asyncio.create_task(live_loop())
     asyncio.create_task(chart_loop())
+    asyncio.create_task(close_watch_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()

@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.16.0", ["/status có Health Bar: 💀 SL bên trái, 🏁 TP bên phải; lỗ thì thanh đỏ chạy từ entry về SL, lãi thì thanh xanh chạy về TP",
+                "2 nút ngay dưới tiêu đề /status: 1m Candle / Health Bar — mặc định Health Bar",
+                "Health Bar cập nhật theo giá mỗi ~3 giây; chart nến 1m vẫn ~15 giây"]),
     ("1.15.0", ["Lệnh mới /lev auto — tool tự chọn đòn bẩy thấp nhất vừa đủ để vào đúng size, bạn chỉ cần quan tâm size"]),
     ("1.14.2", ["/status bỏ dòng Chế độ · Đòn bẩy cho gọn"]),
     ("1.14.1", ["Lệnh bị từ chối vì size nhỏ hơn mức tối thiểu: tin lỗi có nút Open Minimum Order — mở lại đúng lệnh đó (coin, Long/Short, TP, SL) với size tối thiểu",
@@ -1288,7 +1291,8 @@ def live_kb():
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
-    rows = [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
+    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not live.get("chart_off") else []
+    rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
     if menu == "close":
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
@@ -1402,6 +1406,20 @@ async def handle_callback(cq):
         live["confirm"] = None
         live_refresh_now()
         return await answer("Đã huỷ")
+    if data in ("v:hb", "v:c1"):              # chon Health Bar / nen 1m
+        want = data[2:]
+        if live_view() == want:
+            return await answer()
+        live["view"] = want
+        await answer("Health Bar" if want == "hb" else "1m Candle")
+        tg = chart_target()
+        if tg and tg.get("entry"):
+            try:
+                await render_view(tg)            # ve ngay de doi anh cung luc voi dau ✅
+            except Exception as e:
+                log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
+        live_refresh_now()
+        return
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
         if want not in ("close", "tpsl", "tp", "sl"):
@@ -1466,7 +1484,15 @@ LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
 def live_sig():
-    return json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + f"|{live.get('png_v', 0) if live.get('png') else 0}"
+    return (json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
+            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}")
+
+
+def view_buttons():
+    """2 nut chon kieu hien thi, kieu dang chon co dau ✅ (giong cac nut 15m / 1h / 4h)."""
+    v = live_view()
+    return [{"text": ("✅ " if v == "c1" else "⬜ ") + "1m Candle", "callback_data": "v:c1"},
+            {"text": ("✅ " if v == "hb" else "⬜ ") + "Health Bar", "callback_data": "v:hb"}]
 
 
 def live_stamp():
@@ -1489,6 +1515,8 @@ async def start_live(chat):
         asyncio.create_task(live_edit(*old, final=True))
     live["confirm"] = None
     live["menu"] = None
+    live["view"] = "hb"                        # moi tin /status mac dinh la Health Bar
+    live.update(png=None, png_sym=None)
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
     if mid:
         live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, chart_off=False,
@@ -1504,13 +1532,24 @@ async def live_edit(chat, mid, rich, final=False):
     if kb:
         p["reply_markup"] = kb             # sua tin ma khong gui kem thi Telegram xoa mat nut
     png = None if final else live.get("png")
-    if rich and png and not live.get("chart_off"):         # kem bieu do nen 1m ngay duoi tieu de
+    if rich and png and not live.get("chart_off"):         # kem Health Bar / nen 1m ngay duoi tieu de
         blocks = status_blocks(stamp=stamp)
-        f = {"chat_id": str(chat), "message_id": str(mid), "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}}
+        btn = [] if botst.get("rich_buttons") is False else [{"type": "buttons", "buttons": view_buttons()}]
+        f = {"chat_id": str(chat), "message_id": str(mid),
+             "rich_message": {"blocks": [blocks[0]] + btn + [PHOTO_BLOCK] + blocks[1:]}}
         if kb:
             f["reply_markup"] = kb
         r = await bot_form("editMessageText", f, {"chart": png})
         desc = str(r.get("description") or "")
+        if btn and not r.get("ok") and "button" in desc.lower():
+            botst["rich_buttons"] = False      # Telegram chua nhan nut trong rich message -> dua 2 nut xuong ban phim
+            log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển 2 nút xuống dưới tin")
+            kb = live_kb()
+            f["rich_message"] = {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}
+            if kb:
+                f["reply_markup"] = kb
+            r = await bot_form("editMessageText", f, {"chart": png})
+            desc = str(r.get("description") or "")
         if r.get("ok") or "not modified" in desc or _net_err(desc) or "Too Many Requests" in desc or "retry after" in desc.lower():
             return r
         live["chart_off"] = True
@@ -1848,6 +1887,99 @@ def render_candles(candles, marks, title, dec=2, W=900, H=480):
             + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+_FONT.update({
+    "+": "00000 00100 00100 11111 00100 00100 00000", "%": "11001 11010 00010 00100 01000 01011 10011",
+    "(": "00010 00100 01000 01000 01000 00100 00010", ")": "01000 00100 00010 00010 00010 00100 01000",
+})
+_SKULL = ["..XXXXXXX..", ".XXXXXXXXX.", "XXXXXXXXXXX", "XX...X...XX", "XX...X...XX", "XXXXXXXXXXX",
+          ".XXXX.XXXX.", "..XXXXXXX..", "..X.X.X.X..", "..XXXXXXX.."]
+HB_RED, HB_GREEN, HB_BLUE = b"\xe5\x39\x35", b"\x2e\xb8\x5c", b"\x2f\x7f\xe0"
+
+
+def render_health(tg, price, W=900, H=210):
+    """Thanh mau: trai = SL (dau lau), phai = TP (co dich). Lo -> phan to do tu entry chay ve SL;
+    lai -> phan to xanh tu entry chay ve TP. -> bytes PNG"""
+    buf = bytearray(b"\xff" * (W * H * 3))
+
+    def rect(x0, y0, x1, y1, col):
+        x0, x1 = max(0, int(x0)), min(W - 1, int(x1))
+        for y in range(max(0, int(y0)), min(H - 1, int(y1)) + 1):
+            if x1 >= x0:
+                i = (y * W + x0) * 3
+                buf[i:i + (x1 - x0 + 1) * 3] = col * (x1 - x0 + 1)
+
+    def text(x, y, s_, col, sc=3):
+        for ch in s_:
+            g = _FONT.get(ch, _FONT[" "]).split()
+            for r, row in enumerate(g):
+                for c, bit in enumerate(row):
+                    if bit == "1":
+                        rect(x + c * sc, y + r * sc, x + c * sc + sc - 1, y + r * sc + sc - 1, col)
+            x += 6 * sc
+
+    tw = lambda s_, sc=3: len(s_) * 6 * sc - sc
+    dec = price_dec(tg["symbol"])
+    pl = lambda v: f"{v:.2f}" if abs(v) >= 1 else f"{v:.{dec}f}"
+    INK, MUTED, OUT = b"\x2b\x31\x3a", b"\x7a\x83\x8f", b"\x3a\x40\x4a"
+    side, entry = tg["side"], tg["entry"]
+    d = 1 if side == "Buy" else -1
+    tp, sl = tg.get("tp"), tg.get("sl")
+    far = max(entry * 0.02, abs(price - entry) * 1.25)
+    if not tp and not sl:
+        tp_v, sl_v = entry + d * far, entry - d * far
+    else:
+        tp_v = tp or entry + d * abs(entry - sl)
+        sl_v = sl or entry - d * abs(tp - entry)
+    span = (tp_v - sl_v) or 1e-12
+    frac = lambda v: min(1.0, max(0.0, (v - sl_v) / span))      # 0 = SL, 1 = TP (dung cho ca Long va Short)
+    BX0, BX1, BY0, BY1 = 92, W - 92, 96, 150
+    X = lambda f: BX0 + int(f * (BX1 - BX0))
+    xe, xp = X(frac(entry)), X(frac(price))
+    up = (price - entry) * d >= 0
+    col = HB_GREEN if up else HB_RED
+    pct = (price / entry - 1) * 100 * d if entry else 0.0
+    # dong tieu de: coin, chieu, gia hien tai, % so voi entry
+    title = f"{coin_of(tg['symbol'])} {side_vn(side).upper()}   NOW {pl(price)}   {pct:+.2f}%"
+    text((W - tw(title)) // 2, 14, title, col)
+    # than thanh: vien + nen trang + phan to mau tu entry toi gia hien tai
+    rect(BX0 - 3, BY0 - 3, BX1 + 3, BY1 + 3, OUT)
+    rect(BX0, BY0, BX1, BY1, b"\xff\xff\xff")
+    rect(min(xe, xp), BY0, max(xe, xp), BY1, col)
+    rect(xp - 2, BY0 - 8, xp + 2, BY1 + 8, INK)                  # vach gia hien tai
+    for y in range(BY0 - 10, BY1 + 11, 8):                        # vach entry (gach doan)
+        rect(xe - 1, y, xe + 1, y + 4, HB_BLUE)
+    # bieu tuong 2 dau: dau lau (SL) va co dich (TP)
+    sc, sy = 6, (BY0 + BY1) // 2 - 30
+    for r, row in enumerate(_SKULL):
+        for c, ch in enumerate(row):
+            if ch == "X":
+                rect(14 + c * sc, sy + r * sc, 14 + c * sc + sc - 1, sy + r * sc + sc - 1, INK)
+    fx = BX1 + 18
+    rect(fx, sy - 4, fx + 4, sy + 66, INK)                        # can co
+    for r in range(4):
+        for c in range(4):
+            rect(fx + 5 + c * 13, sy - 4 + r * 11, fx + 5 + c * 13 + 12, sy - 4 + r * 11 + 10,
+                 INK if (r + c) % 2 == 0 else b"\xff\xff\xff")
+    rect(fx + 5, sy - 4, fx + 57, sy - 4, INK); rect(fx + 5, sy + 39, fx + 57, sy + 39, INK); rect(fx + 57, sy - 4, fx + 57, sy + 39, INK)
+
+    # nhan gia (tren) va ten (duoi); nhan entry tranh de len 2 nhan dau
+    def labels(y, left, mid, right, cl, cm, cr):
+        lw, mw, rw = tw(left), tw(mid), tw(right)
+        lx, rx = max(4, BX0 - lw // 2), min(W - 4 - rw, BX1 - rw // 2)
+        mx = min(max(xe - mw // 2, lx + lw + 28), rx - mw - 28)
+        text(lx, y, left, cl); text(rx, y, right, cr)
+        if lx + lw + 28 <= mx and mx + mw + 28 <= rx:
+            text(mx, y, mid, cm)
+    labels(BY0 - 40, pl(sl) if sl else "NONE", pl(entry), pl(tp) if tp else "NONE", HB_RED, HB_BLUE, HB_GREEN)
+    labels(BY1 + 22, "SL", "ENTRY", "TP", MUTED, MUTED, MUTED)
+    raw = b"".join(b"\x00" + bytes(buf[y * W * 3:(y + 1) * W * 3]) for y in range(H))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
 def chart_target():
     """Coin de ve: coin co tong size (USDT) lon nhat trong cac position dang mo. -> dict | None"""
     agg = {}
@@ -1855,8 +1987,8 @@ def chart_target():
         for p in (status.get(c.name) or {}).get("positions") or []:
             try:
                 size = float(p["size"])
-                a = agg.setdefault(p["symbol"], {"usd": 0.0, "qty": 0.0, "val": 0.0, "side": {}, "tp": [], "sl": []})
-                a["usd"] += size * p["avg"]; a["qty"] += size; a["val"] += size * p["avg"]
+                a = agg.setdefault(p["symbol"], {"usd": 0.0, "qty": 0.0, "val": 0.0, "side": {}, "tp": [], "sl": [], "pnl": 0.0})
+                a["usd"] += size * p["avg"]; a["qty"] += size; a["val"] += size * p["avg"]; a["pnl"] += p.get("pnl") or 0
                 a["side"][p["side"]] = a["side"].get(p["side"], 0) + size * p["avg"]
                 for k in ("tp", "sl"):
                     v = float(p.get(k) or 0)
@@ -1868,8 +2000,10 @@ def chart_target():
         return None
     sym, a = max(agg.items(), key=lambda kv: kv[1]["usd"])
     avg = lambda xs: sum(xs) / len(xs) if xs else None
-    return {"symbol": sym, "side": max(a["side"], key=a["side"].get), "entry": a["val"] / a["qty"] if a["qty"] else None,
-            "tp": avg(a["tp"]), "sl": avg(a["sl"])}
+    side = max(a["side"], key=a["side"].get)
+    entry = a["val"] / a["qty"] if a["qty"] else None
+    est = entry + a["pnl"] / a["qty"] * (1 if side == "Buy" else -1) if entry else None
+    return {"symbol": sym, "side": side, "entry": entry, "tp": avg(a["tp"]), "sl": avg(a["sl"]), "est": est}
 
 
 def chart_png(tg, candles):
@@ -1890,35 +2024,60 @@ async def fetch_candles(symbol):
     return [(int(x[0]) / 1000, float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in rows]
 
 
+def live_view():
+    return live.get("view") or "hb"          # mac dinh: Health Bar
+
+
+def cur_price(tg):
+    if time.time() - prices["t"] <= PRICE_MAX_AGE and tg["symbol"] in prices["map"]:
+        return float(prices["map"][tg["symbol"]])
+    return tg.get("est") or tg["entry"]
+
+
+def set_png(png, key):
+    if png != live.get("png"):
+        live.update(png=png, png_v=live.get("png_v", 0) + 1)
+    live["png_sym"] = key
+
+
+async def render_view(tg):
+    """Ve anh theo che do dang chon cho tin /status. Health bar: ve ngay (khong can mang). Nen 1m: lay nen tu Bybit."""
+    if live_view() == "hb":
+        png = await asyncio.to_thread(render_health, tg, cur_price(tg))
+        set_png(png, ("hb", tg["symbol"]))
+        return
+    candles = await fetch_candles(tg["symbol"])
+    if len(candles) < 2:
+        return
+    px = cur_price(tg)
+    t, o, h, l, _ = candles[-1]              # nen cuoi theo gia moi nhat
+    candles[-1] = (t, o, max(h, px), min(l, px), px)
+    png = await asyncio.to_thread(chart_png, tg, candles)
+    set_png(png, ("c1", tg["symbol"]))
+
+
 async def chart_loop():
-    """Giu san anh bieu do nen 1m cho tin /status dang tu cap nhat. Het position -> bo anh."""
+    """Giu san anh (Health Bar hoac nen 1m) cho tin /status dang tu cap nhat. Het position -> bo anh."""
     nxt = 0.0
     while True:
         await asyncio.sleep(1)
         try:
             on = live["mid"] and live["rich"] and cfg["bot_token"] and not live.get("chart_off")
             tg = chart_target() if on else None
-            if not tg:
+            if not tg or not tg.get("entry"):
                 if live.get("png"):
                     live.update(png=None, png_sym=None, png_v=live.get("png_v", 0) + 1)
                 nxt = 0.0
                 continue
             now = time.time()
-            if busy["n"] or (now < nxt and live.get("png_sym") == tg["symbol"]):
+            key = (live_view(), tg["symbol"]) if live_view() == "hb" else ("c1", tg["symbol"])
+            if busy["n"] or (now < nxt and live.get("png_sym") == key):
                 continue                     # dang vao/dong lenh -> nhuong duong
             nxt = now + 5                    # loi thi 5 giay sau thu lai
-            candles = await fetch_candles(tg["symbol"])
-            if len(candles) < 2:
-                continue
-            if time.time() - prices["t"] <= PRICE_MAX_AGE and tg["symbol"] in prices["map"]:
-                t, o, h, l, _ = candles[-1]  # nen cuoi theo gia moi nhat
-                px = float(prices["map"][tg["symbol"]])
-                candles[-1] = (t, o, max(h, px), min(l, px), px)
-            png = await asyncio.to_thread(chart_png, tg, candles)
-            live.update(png=png, png_sym=tg["symbol"], png_v=live.get("png_v", 0) + 1)
-            nxt = time.time() + CHART_EVERY
+            await render_view(tg)
+            nxt = time.time() + (LIVE_EVERY if live_view() == "hb" else CHART_EVERY)
         except Exception as e:
-            log(f"chart 1m: {type(e).__name__}: {str(e)[:100]}")
+            log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
             nxt = time.time() + 10
 
 
@@ -2564,6 +2723,11 @@ def selftest():
     _cd = [(1700000000 + 60 * i, 100 + i % 7, 101.5 + i % 7, 99.2 + i % 5, 100.4 + (i * 3) % 7) for i in range(60)]
     assert chart_target() is None
     assert chart_png({"symbol": "ETHUSDT", "side": "Buy", "entry": 101.0, "tp": 104.0, "sl": 90.0}, _cd)[:4] == b"\x89PNG"
+    for _tg in ({"symbol": "ETHUSDT", "side": "Buy", "entry": 100.0, "tp": 110.0, "sl": 95.0},
+                {"symbol": "ETHUSDT", "side": "Sell", "entry": 100.0, "tp": None, "sl": 103.0},
+                {"symbol": "ETHUSDT", "side": "Buy", "entry": 100.0, "tp": None, "sl": None}):
+        for _px in (90.0, 99.0, 100.0, 104.0, 120.0):
+            assert render_health(_tg, _px)[:4] == b"\x89PNG"
     status["Acc1"] = {"balance": 1.0, "error": "", "t": 0, "positions": [
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}

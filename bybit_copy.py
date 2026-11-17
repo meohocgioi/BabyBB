@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.16.0"
+VERSION = "1.16.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.16.1", ["Sửa lỗi Health Bar / chart 1m biến mất hẳn khỏi /status sau một lần Telegram lỗi tạm thời — giờ tự hiện lại sau ít giây",
+                "Lỗi máy chủ Telegram (502/500) không còn làm tin /status ngừng cập nhật"]),
     ("1.16.0", ["/status có Health Bar: 💀 SL bên trái, 🏁 TP bên phải; lỗ thì thanh đỏ chạy từ entry về SL, lãi thì thanh xanh chạy về TP",
                 "2 nút ngay dưới tiêu đề /status: 1m Candle / Health Bar — mặc định Health Bar",
                 "Health Bar cập nhật theo giá mỗi ~3 giây; chart nến 1m vẫn ~15 giây"]),
@@ -1291,7 +1293,7 @@ def live_kb():
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
-    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not live.get("chart_off") else []
+    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not photo_paused() else []
     rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
     if menu == "close":
@@ -1485,7 +1487,7 @@ LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 def live_sig():
     return (json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
-            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}")
+            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}|{photo_paused()}")
 
 
 def view_buttons():
@@ -1519,7 +1521,7 @@ async def start_live(chat):
     live.update(png=None, png_sym=None)
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
     if mid:
-        live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, chart_off=False,
+        live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, photo_fail=0, photo_off_until=0,
                     sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + "|0")   # "|0": chua kem bieu do
         cfg["live_msg"] = [chat, mid, rich]
         save_cfg()
@@ -1532,7 +1534,7 @@ async def live_edit(chat, mid, rich, final=False):
     if kb:
         p["reply_markup"] = kb             # sua tin ma khong gui kem thi Telegram xoa mat nut
     png = None if final else live.get("png")
-    if rich and png and not live.get("chart_off"):         # kem Health Bar / nen 1m ngay duoi tieu de
+    if rich and png and not photo_paused():         # kem Health Bar / nen 1m ngay duoi tieu de
         blocks = status_blocks(stamp=stamp)
         btn = [] if botst.get("rich_buttons") is False else [{"type": "buttons", "buttons": view_buttons()}]
         f = {"chat_id": str(chat), "message_id": str(mid),
@@ -1550,10 +1552,16 @@ async def live_edit(chat, mid, rich, final=False):
                 f["reply_markup"] = kb
             r = await bot_form("editMessageText", f, {"chart": png})
             desc = str(r.get("description") or "")
-        if r.get("ok") or "not modified" in desc or _net_err(desc) or "Too Many Requests" in desc or "retry after" in desc.lower():
+        if r.get("ok") or "not modified" in desc:
+            live["photo_fail"] = 0
             return r
-        live["chart_off"] = True
-        log(f"/status: Telegram không nhận biểu đồ trong tin ({desc[:100]}) — tiếp tục cập nhật không kèm biểu đồ")
+        if _net_err(desc) or "Too Many Requests" in desc or "retry after" in desc.lower():
+            return r
+        # Telegram tu choi anh lan nay: KHONG tat han — tam sua tin khong kem anh, roi thu lai (30s, 60s, ... toi da 5 phut)
+        n = live.get("photo_fail", 0) + 1
+        live["photo_fail"] = n
+        live["photo_off_until"] = time.time() + min(300, 30 * 2 ** (n - 1))
+        log(f"/status: Telegram không nhận ảnh trong tin ({desc[:100]}) — tạm ẩn ảnh, thử lại sau {min(300, 30 * 2 ** (n - 1))}s")
     if rich:
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
     else:
@@ -1587,7 +1595,7 @@ async def live_loop():
             elif "Too Many Requests" in desc or "retry after" in desc.lower():
                 wait = float((r.get("parameters") or {}).get("retry_after") or 10)
                 live["wait"] = time.time() + wait + 1
-            elif "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
+            elif _net_err(desc):
                 live["wait"] = time.time() + 5
             else:                      # tin da bi xoa / khong sua duoc nua
                 live_stop(desc[:100])
@@ -2062,7 +2070,7 @@ async def chart_loop():
     while True:
         await asyncio.sleep(1)
         try:
-            on = live["mid"] and live["rich"] and cfg["bot_token"] and not live.get("chart_off")
+            on = live["mid"] and live["rich"] and cfg["bot_token"]
             tg = chart_target() if on else None
             if not tg or not tg.get("entry"):
                 if live.get("png"):
@@ -2261,7 +2269,14 @@ async def bot_form(method, fields, files, _timeout=25):
 
 
 def _net_err(desc):
-    return "Timeout" in desc or "Connect" in desc or "Disconnected" in desc
+    """Loi tam thoi (mang / may chu Telegram qua tai) -> lan sau thu lai, khong tat tinh nang."""
+    d = desc.lower()
+    return any(k in d for k in ("timeout", "connect", "disconnected", "bad gateway", "internal server error",
+                                "service unavailable", "gateway", "server error", "payload", "reset by peer"))
+
+
+def photo_paused():
+    return time.time() < live.get("photo_off_until", 0)
 
 
 async def per_send(chat, kind):

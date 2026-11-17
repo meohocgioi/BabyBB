@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.10.1"
+VERSION = "1.10.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.10.2", ["Rà soát toàn bộ số hiển thị: tối đa 2 số sau dấu chấm; giá entry/exit từ 1 trở lên cũng 2 số (vd 2003.12)",
+                "Riêng giá coin dưới 1 USDT giữ 4 chữ số có nghĩa (vd 0.004321) để không bị hiện thành 0.00"]),
     ("1.10.1", ["PnL và phí hiện 2 số sau dấu chấm (vd -1.07) ở /per, Position History, /status, /close — bảng gọn hơn trên điện thoại"]),
     ("1.10.0", ["Lệnh mới /buyall #coin tp sl — mở Long toàn bộ vốn mỗi acc với đòn bẩy max của coin (size lớn nhất có thể)",
                 "Lệnh mới /sellall #coin tp sl — giống /buyall nhưng mở Short",
@@ -519,7 +521,7 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"], side))
         val = float(qty) * price       # gia tri thuc sau khi lam tron so luong theo buoc cua san
-        return f"✅ {c.name}: {side_vn(side)} {symbol} ~{val:.1f} USDT, x{lev:g}{note}"
+        return f"✅ {c.name}: {side_vn(side)} {symbol} ~{val:.2f} USDT, x{lev:g}{note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
 
@@ -642,7 +644,7 @@ def order_hints(res, coin, symbol, price, tp, sl, source, allin):
             H.append(f"   Gõ lại: {source} #{coin.lower()} {mu:g} {tp:g} {sl:g}")
         else:
             unit = float(cfg["size_unit"]) or 1
-            H.append(f"   Lệnh kênh cần size ≥ {mu / unit:g} (1 = {unit:g} USDT), hoặc đổi sang chế độ Custom với size ≥ {mu:g} USDT.")
+            H.append(f"   Lệnh kênh cần size ≥ {math.ceil(mu / unit * 100) / 100:g} (1 = {unit:g} USDT), hoặc đổi sang chế độ Custom với size ≥ {mu:g} USDT.")
     if "insufficient" in bad or "not enough" in bad:
         caps = []
         for c in clients:
@@ -721,9 +723,10 @@ POS_ALIGN = [None, None, "right", "right", "right"]
 
 
 def num(x):
-    """So gon cho gia/size: 2003.1, 0.01234"""
+    """Gia: tu 1 tro len -> 2 so sau dau cham (2003.12); duoi 1 -> 4 chu so co nghia (0.01234)."""
     try:
-        return f"{float(x):.6g}"
+        v = float(x)
+        return f"{v:.2f}" if abs(v) >= 1 else f"{v:.4g}"
     except Exception:
         return str(x)
 
@@ -2156,6 +2159,7 @@ def selftest():
     assert parse_buy("/sell #eth 500 5 1")["size"] == 500
     assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/buyall #x 1 2")["coin"] == "X"
     assert parse_allin("/sellall #x 1 2")["sl"] == 2 and parse_allin("/allin #x 1 2") is None
+    assert num(2003.126) == "2003.13" and num("0.00432156") == "0.004322"
     assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
     global clients
     clients = [Bybit("Acc1", "k", "s", "x")]

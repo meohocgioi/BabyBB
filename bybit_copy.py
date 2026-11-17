@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.18.0"
+VERSION = "1.18.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.18.1", ["Close Custom Size: tiêu đề ghi rõ đã đóng bao nhiêu và còn lại bao nhiêu; mỗi acc ghi \"Đóng X · còn Y\"",
+                "Sau khi đóng, bot gửi luôn bảng /status mới để thấy position còn lại"]),
     ("1.18.0", ["Close Order có thêm nút Close Custom Size: hiện Total Size của cả 5 acc, bạn gõ số USDT muốn đóng, tool chia đều cho các acc",
                 "Gõ quá nhỏ: báo size tối thiểu + nút Close Minimum. Gõ lớn hơn position: báo để nhập lại"]),
     ("1.17.2", ["Close Order: bấm 10% / 30% / 50% / 70% / 100% là đóng ngay, bỏ bước Xác nhận"]),
@@ -732,8 +734,21 @@ async def cc_close(chat, amount):
     rows = [x for sub in res for x in sub]
     add_realized(rows)
     done = sum(float(x.get("size") or 0) * info["price"] for x in rows if x.get("ok"))   # theo gia hien tai
-    send_rich(chat, *close_report(rows, title=f"✂️ Đã đóng ~{done:.2f} / {amount:g} USDT {coin_of(info['symbol'])}"))
-    live_refresh_now()
+    closed = {}
+    for x in rows:
+        if x.get("ok"):
+            closed[x["acc"]] = closed.get(x["acc"], 0) + float(x.get("size") or 0) * info["price"]
+    remain = {y["c"].name: max(0.0, y["usd"] - closed.get(y["c"].name, 0)) for y in info["subs"]}
+    left = sum(remain.values())
+    title = (f"✂️ Đã đóng ~{done:.2f} USDT {coin_of(info['symbol'])} — còn lại ~{left:.2f} USDT"
+             if left > 0.01 else f"✂️ Đã đóng hết ~{done:.2f} USDT {coin_of(info['symbol'])}")
+    await _send_rich(chat, *close_report(rows, title=title, remain=remain if left > 0.01 else None))
+    try:                                   # gui bang /status moi ngay ben duoi de thay position con lai
+        await asyncio.sleep(0.6)
+        await asyncio.gather(*(refresh_one(c) for c in clients))
+        await start_live(chat)
+    except Exception as e:
+        log(f"⚠️ Không gửi được bảng /status sau khi đóng: {type(e).__name__}: {str(e)[:100]}")
 
 
 def short_margin(r):
@@ -1105,7 +1120,8 @@ async def close_all():
     return close_report(rows, prev_n)
 
 
-def close_report(rows, prev_n=0, title=None):
+def close_report(rows, prev_n=0, title=None, remain=None):
+    """remain = {acc: USDT con lai} khi chi dong mot phan -> moi dong ghi 'Đóng X · còn Y'."""
     """rows tu close_one -> (ban chu, blocks) bang ket qua dong lenh."""
     if not rows:
         log("Không có position nào đang mở")
@@ -1131,7 +1147,9 @@ def close_report(rows, prev_n=0, title=None):
                  f"   Size {x['usd']:.2f} USDT | {px}\n"
                  f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
         R.append([[B(x["acc"]), f"\n{dot(x['pnl'])}\u00a0{x['pct']:+.2f}%"],
-                  [B(f"{side_vn(x['side'])} {coin_of(x['symbol'])}"), f" x{x['lev']}\nSize {x['usd']:.0f}\n{px}"],
+                  [B(f"{side_vn(x['side'])} {coin_of(x['symbol'])}"),
+                   (f" x{x['lev']}\nĐóng {x['usd']:.0f} · còn {remain.get(x['acc'], 0):.0f}\n{px}" if remain is not None
+                    else f" x{x['lev']}\nSize {x['usd']:.0f}\n{px}")],
                   B(f"{x['pnl']:+.2f}{'*' if x['est'] else ''}")])
         log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
     blocks = [r_head(title)]

@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.11.1", ["Bỏ dòng Total fee ở /per và Position History (PnL đã gồm phí)"]),
     ("1.11.0", ["/per và Position History gọn hơn trên điện thoại: bỏ cột Fee, thêm dòng Total fee cuối bảng",
                 "Chấm 🟢/🔴 nằm cùng dòng với số PnL; Position History ghi Long/Short và số acc (vd 4 acc)",
                 "Biểu đồ balance: trục dọc không còn lặp cùng một số khi balance gần như không đổi",
@@ -1642,7 +1643,6 @@ def per_view(kind, data, desc):
     wr = f"{tw / tn * 100:.0f}%" if tn else "—"
     T.append(f"Tổng: {tn} lệnh | win {wr} | {dot(tp)} {tp:+.2f} USDT | fee {tf:.2f}")
     R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)}\u00a0{tp:+.2f}")])
-    R.append([B("Total fee"), "", "", B(f"{tf:.2f}")])
     stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     T.append(stamp)
     blocks = [r_head(title),
@@ -1680,7 +1680,6 @@ def history_view(data, limit=5):
     stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     blocks = [r_head(title)]
     if R:
-        R.append([B("Total fee"), "", B(f"{sum(g['fee'] for g in groups):.2f}")])
         blocks.append(r_table(["Position", "Size", "PnL"], R, [None, "right", "right"]))
     else:
         T.append("Chưa có position nào được đóng trong 30 ngày qua.")
@@ -1707,7 +1706,7 @@ async def per_build(kind):
         now = int(time.time() * 1000) + time_offset
         data = await asyncio.gather(*(one(c, now - WEEK_MS) for c in clients))
         text, blocks = history_view(data)
-        if len(blocks[1].get("cells", [])) - 2 < 5:     # tru dong tieu de va dong Total fee
+        if len(blocks[1].get("cells", [])) - 1 < 5:
             data = await asyncio.gather(*(one(c, now - 30 * 86400 * 1000) for c in clients))   # chua du 5 -> nhin xa hon
             text, blocks = history_view(data)
     else:

@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.12.0"
+VERSION = "1.12.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.12.1", ["/status gọn hơn: bỏ cột Phí, thêm dòng Total fee ở cuối bảng",
+                "Cột PnL USDT đổi tên thành uPnL; chấm 🟢/🔴 nằm cùng dòng với PnL %"]),
     ("1.12.0", ["/status có chart nến 1 phút (60 nến gần nhất) của coin đang mở, kèm vạch ENTRY / TP / SL",
                 "Chart tự cập nhật khoảng 15 giây/lần cho đến khi mọi sub account đóng hết position",
                 "Đang mở nhiều coin thì vẽ coin có size lớn nhất"]),
@@ -726,6 +728,8 @@ def r_foot(text):
 
 POS_HEAD = ["Acc", "Position", "Phí", "PnL %", "PnL USDT"]
 POS_ALIGN = [None, None, "right", "right", "right"]
+STATUS_HEAD = ["Acc", "Position", "PnL %", "uPnL"]         # /status: khong co cot phi, tong phi nam o dong cuoi
+STATUS_ALIGN = [None, None, "right", "right"]
 
 
 
@@ -939,7 +943,9 @@ def status_text():
                              f"   Size {float(p['size']) * p['avg']:.2f} USDT | entry {num(p['avg'])} | phí {p.get('fee', 0):.2f}\n"
                              f"   {dot(p['pnl'])} {p['pct']:+.2f}% | {p['pnl']:+.2f} USDT")
     if any((status.get(c.name) or {}).get("positions") for c in clients):
-        lines.append(f"Tổng PnL đang mở: {dot(tot)} {tot:+.2f} USDT")
+        lines.append(f"Tổng uPnL: {dot(tot)} {tot:+.2f} USDT")
+        fee = sum((p.get("fee", 0) or 0) for c in clients for p in (status.get(c.name) or {}).get("positions") or [])
+        lines.append(f"Total fee: {fee:.2f} USDT")
     return "\n".join(lines)
 
 
@@ -955,25 +961,27 @@ def status_blocks(title=None, stamp=None):
                               [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
                                 B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
                                ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
-    R, tot, has = [], 0.0, False
+    R, tot, fee, has = [], 0.0, 0.0, False
     for c in clients:
         st = status.get(c.name) or {}
         if st.get("error"):
-            R.append([B(c.name), f"⚠️ {st['error']}", "", "", ""])
+            R.append([B(c.name), f"⚠️ {st['error']}", "", ""])
         elif not st.get("positions"):
             bal = f"No Position\nAvai {st['balance']:.2f} USDT" if st.get("balance") is not None else "No Position"
-            R.append([B(c.name), bal, "", "", ""])
+            R.append([B(c.name), bal, "", ""])
         else:
             for p in st["positions"]:
                 has = True
                 tot += p["pnl"]
+                fee += p.get("fee", 0) or 0
                 R.append([B(c.name), [B(f"{side_vn(p['side'])} {p['symbol']}"),
                                       f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.2f} USDT\nEntry {num(p['avg'])}"],
-                          f"{p.get('fee', 0):.2f}", f"{dot(p['pnl'])} {p['pct']:+.2f}%", B(f"{p['pnl']:+.2f}")])
+                          f"{dot(p['pnl'])}\u00a0{p['pct']:+.2f}%", B(f"{p['pnl']:+.2f}")])
     if has:
-        R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.2f}")])
+        R.append([B("Tổng"), "", dot(tot), B(f"{tot:+.2f}")])
+        R.append([B("Total fee"), "", "", B(f"{fee:.2f}")])
     if R:
-        blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
+        blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     else:
         blocks.append(r_par("Chưa cài sub account nào."))
     if stamp:

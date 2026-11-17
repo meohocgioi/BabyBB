@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.17.2"
+VERSION = "1.18.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.18.0", ["Close Order có thêm nút Close Custom Size: hiện Total Size của cả 5 acc, bạn gõ số USDT muốn đóng, tool chia đều cho các acc",
+                "Gõ quá nhỏ: báo size tối thiểu + nút Close Minimum. Gõ lớn hơn position: báo để nhập lại"]),
     ("1.17.2", ["Close Order: bấm 10% / 30% / 50% / 70% / 100% là đóng ngay, bỏ bước Xác nhận"]),
     ("1.17.1", ["Nút dưới /status phản hồi nhanh hơn: bấm Close Order, Edit TP & SL, chọn % … chỉ đổi hàng nút, không tải lại cả tin và ảnh",
                 "Nút 1m Candle / Health Bar đổi ảnh ngay, không chờ vòng cập nhật"]),
@@ -626,6 +628,114 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
         return f"❌ {c.name}: {e}"
 
 
+CC_TTL = 300                  # cho nhap size trong 5 phut
+
+
+def cc_info():
+    """Position dang mo (coin lon nhat) tren cac acc -> dict de dong theo size USDT, hoac None."""
+    tg = chart_target()
+    if not tg:
+        return None
+    sym, ins = tg["symbol"], instruments.get(tg["symbol"])
+    if not ins:
+        return None
+    price = cur_price(tg)
+    subs = []
+    for c in clients:
+        for p in (status.get(c.name) or {}).get("positions") or []:
+            if p["symbol"] == sym:
+                subs.append({"c": c, "qty": D(str(p["size"])), "usd": float(p["size"]) * price})
+    if not subs:
+        return None
+    # so luong nho nhat 1 acc dong duoc: theo min so luong VA gia tri lenh toi thieu cua san (+3% gia chay)
+    need = max(ins["min"], D(str(ins.get("minval", 0) or 0)) * D("1.03") / D(str(price)))
+    unit = (need / ins["step"]).to_integral_value(rounding="ROUND_CEILING") * ins["step"]
+    min_total = math.ceil(float(unit) * price * len(subs) * 1.02 * 100) / 100
+    return {"symbol": sym, "side": tg["side"], "price": price, "subs": subs, "ins": ins, "unit": unit,
+            "total": sum(x["usd"] for x in subs), "min": min_total}
+
+
+def cc_plan(info, amount):
+    """Chia deu amount USDT cho cac acc; acc nao position nho hon phan cua minh thi dong het,
+    phan con thieu chia tiep cho cac acc con lai. -> {ten acc: so luong coin}"""
+    left, todo, plan = amount, sorted(info["subs"], key=lambda x: x["usd"]), {}
+    step = info["ins"]["step"]
+    for i, x in enumerate(todo):
+        share = left / (len(todo) - i)
+        take = min(share, x["usd"])
+        left -= take
+        if take >= x["usd"] * 0.995:
+            q = x["qty"]                                         # dong het position cua acc nay
+        else:
+            q = floor_step(D(str(take)) / D(str(info["price"])), step)
+        if q >= info["unit"] or q == x["qty"]:       # dong het position luon duoc phep
+            plan[x["c"].name] = q
+    return plan
+
+
+def cc_prompt_blocks(info, warn=None):
+    coin = coin_of(info["symbol"])
+    R = [["Position", B(f"{side_vn(info['side'])} {coin}")],
+         ["Total Size", B(f"{info['total']:.2f} USDT")],
+         ["Tối thiểu", f"{info['min']:.2f} USDT"]]
+    blocks = [r_head("✂️ Close Custom Size")]
+    if warn:
+        blocks.append(r_par(warn))
+    blocks += [r_table(["", ""], R, [None, "right"]),
+               r_par(["Enter size to close: ", B("gõ số USDT"), " (vd 200) rồi gửi. Tool chia đều cho các acc."])]
+    return blocks
+
+
+async def cc_ask(chat, warn=None, min_btn=False):
+    """Gui bang mini + o nhap size (force reply)."""
+    info = cc_info()
+    if not info:
+        live.pop("cc", None)
+        return send(chat, "Không có position nào đang mở.")
+    text = (("⚠️ " + warn + "\n") if warn else "") + \
+           f"✂️ Close Custom Size — {side_vn(info['side'])} {coin_of(info['symbol'])}\n" \
+           f"Total Size: {info['total']:.2f} USDT (tối thiểu {info['min']:.2f})\nEnter size to close (USDT):"
+    kb = {"force_reply": True, "input_field_placeholder": f"Size USDT muốn đóng (≤ {info['total']:.0f})"}
+    if min_btn:
+        kb = {"inline_keyboard": [[{"text": f"Close Minimum (~{info['min']:.2f} USDT)", "callback_data": "ccm"}]]}
+    mid, _ = await _send_rich(chat, text, cc_prompt_blocks(info, warn and "⚠️ " + warn), kb)
+    live["cc"] = {"t": time.time(), "mid": mid, "symbol": info["symbol"]}
+    if min_btn:                          # van cho go lai so khac: them 1 tin hoi co o nhap
+        m2, _ = await _send(chat, "Hoặc gõ size khác (USDT):", {"force_reply": True,
+                                                                 "input_field_placeholder": f"≥ {info['min']:.2f}"})
+        live["cc"]["mid2"] = m2
+
+
+async def cc_close(chat, amount):
+    """Dong amount USDT (chia deu cac acc) cua position dang mo."""
+    info = cc_info()
+    if not info:
+        live.pop("cc", None)
+        return send(chat, "Không có position nào đang mở.")
+    if amount > info["total"] * 1.001 + 0.01:
+        return await cc_ask(chat, f"{amount:g} USDT lớn hơn tổng position ({info['total']:.2f} USDT). Nhập lại size nhỏ hơn.")
+    if amount < info["min"]:
+        return await cc_ask(chat, f"{amount:g} USDT quá nhỏ: mỗi acc phải đóng ít nhất ~{float(info['unit']) * info['price']:.2f} USDT (mức tối thiểu của sàn), "
+                                  f"tổng cộng tối thiểu {info['min']:.2f} USDT.", min_btn=True)
+    live.pop("cc", None)
+    if amount >= info["total"] * 0.995:
+        plan = {x["c"].name: x["qty"] for x in info["subs"]}       # gan bang tong -> dong het
+    else:
+        plan = cc_plan(info, amount)
+    log(f"✂️ Close Custom Size {amount:g} USDT {info['symbol']}: " + ", ".join(f"{k} {fmt(v)}" for k, v in plan.items()))
+    busy["n"] += 1
+    try:
+        res = await asyncio.gather(*(close_one(c, plan={info["symbol"]: plan[c.name]})
+                                     for c in clients if c.name in plan))
+    finally:
+        busy["n"] -= 1
+    rows = [x for sub in res for x in sub]
+    add_realized(rows)
+    done = sum(float(x.get("size") or 0) * info["price"] for x in rows if x.get("ok"))   # theo gia hien tai
+    send_rich(chat, *close_report(rows, title=f"✂️ Đã đóng ~{done:.2f} / {amount:g} USDT {coin_of(info['symbol'])}"))
+    live_refresh_now()
+
+
 def short_margin(r):
     """Bybit tu choi vi khong du ky quy / so du."""
     m = str(r.get("retMsg", "")).lower()
@@ -862,14 +972,19 @@ def side_vn(side):
     return "Long" if side == "Buy" else "Short"
 
 
-async def close_one(c, pct=100):
-    """Dong pct% moi position cua 1 acc, tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
+async def close_one(c, pct=100, plan=None):
+    """Dong pct% moi position cua 1 acc (hoac dung so luong trong plan = {symbol: qty}),
+    tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
     rows = []
     try:
         t_ms = int(time.time() * 1000) + time_offset - 3000
         for p in await c.positions():
             qty = p["size"]
-            if pct < 100:
+            if plan is not None:
+                if p["symbol"] not in plan:
+                    continue
+                qty = fmt(min(D(str(plan[p["symbol"]])), D(str(p["size"]))))
+            elif pct < 100:
                 if p["symbol"] not in instruments:
                     try:
                         await load_instruments(p["symbol"])
@@ -987,6 +1102,11 @@ async def close_all():
     rows = [x for sub in res for x in sub]
     prev_n = (cfg.get("realized") or {}).get("n", 0)
     add_realized(rows)
+    return close_report(rows, prev_n)
+
+
+def close_report(rows, prev_n=0, title=None):
+    """rows tu close_one -> (ban chu, blocks) bang ket qua dong lenh."""
     if not rows:
         log("Không có position nào đang mở")
         return ("🛑 Không có position nào đang mở",
@@ -995,7 +1115,8 @@ async def close_all():
     tot = sum(x["pnl"] for x in done)
     fees = [x["fee"] for x in done if x["fee"] is not None]
     est = any(x["est"] for x in done)
-    T = [f"🛑 Đã đóng {len(done)}/{len(rows)} position"]
+    title = title or f"🛑 Đã đóng {len(done)}/{len(rows)} position"
+    T = [title]
     R, errs = [], []
     for x in rows:
         if not x["ok"]:
@@ -1013,7 +1134,7 @@ async def close_all():
                   [B(f"{side_vn(x['side'])} {coin_of(x['symbol'])}"), f" x{x['lev']}\nSize {x['usd']:.0f}\n{px}"],
                   B(f"{x['pnl']:+.2f}{'*' if x['est'] else ''}")])
         log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
-    blocks = [r_head(f"🛑 Đã đóng {len(done)}/{len(rows)} position")]
+    blocks = [r_head(title)]
     if done:
         ft = f"{sum(fees):.2f}" if fees else "—"
         note = ("* PnL ước tính theo giá lúc đóng, chưa trừ phí (Bybit chưa trả số liệu)" if est
@@ -1377,6 +1498,7 @@ def live_kb():
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
     if menu == "close":
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
+        rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
     elif menu in ("tpsl", "tp", "sl"):
         rows.append([{"text": mark(menu == "tp", "Edit TP"), "callback_data": "m:tp"},
                      {"text": mark(menu == "sl", "Edit SL"), "callback_data": "m:sl"}])
@@ -1516,6 +1638,19 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data in ("cc", "ccm"):
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        if data == "cc":
+            asyncio.create_task(answer())
+            live["menu"] = None
+            asyncio.create_task(kb_now())
+            return await cc_ask(chat)
+        info = cc_info()
+        if not info or not live.get("cc"):
+            return await answer("Hết hạn — bấm lại Close Custom Size", True)
+        asyncio.create_task(answer(f"Đang đóng {info['min']:.2f} USDT…"))
+        await bot_api("editMessageReplyMarkup", _quiet=True, chat_id=chat, message_id=mid)
+        return await cc_close(chat, info["min"])
     if mid != live["mid"]:
         return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
     if data == "no":
@@ -2553,6 +2688,19 @@ async def handle_update(u):
             if chat != str(cfg["bot_owner_id"]).strip():
                 send(chat, f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
                 return
+            cc = live.get("cc")
+            txt = (m.get("text") or "").strip().replace(",", ".").upper().replace("USDT", "").strip()
+            if cc and not cmd.startswith("/") and time.time() - cc["t"] < CC_TTL:
+                try:
+                    amount = float(txt)
+                except ValueError:
+                    amount = None
+                if amount is not None:
+                    if amount <= 0:
+                        await cc_ask(chat, "Size phải lớn hơn 0. Nhập lại.")
+                    else:
+                        await cc_close(chat, amount)
+                    return
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
                 send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_blocks("▶️ Bot đã chạy"))

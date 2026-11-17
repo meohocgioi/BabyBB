@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.10.0", ["Lệnh mới /buyall #coin tp sl — mở Long toàn bộ vốn mỗi acc với đòn bẩy max của coin (size lớn nhất có thể)",
+                "Lệnh mới /sellall #coin tp sl — giống /buyall nhưng mở Short",
+                "Bỏ lệnh /allin (thay bằng /buyall); /buyall và /sellall không cần đặt /lev trước"]),
     ("1.9.0", ["/per có biểu đồ đường: total balance trung bình của các acc (1 day: mốc 4 giờ; week/month: mốc theo ngày)",
                "Tool tự ghi balance mỗi 5 phút để vẽ biểu đồ (dữ liệu bắt đầu từ bản này)"]),
     ("1.8.1", ["Mọi chỗ hiện size đều tính bằng USDT (/status, /close, /per, tin vào lệnh, tin báo lỗi)",
@@ -94,7 +97,7 @@ DEFAULT_CFG = {
     "realized": {"pnl": 0.0, "fee": 0.0, "n": 0},   # PnL da chot cua dot position hien tai
     "live_msg": None,               # [chat, message_id, rich] cua tin /status dang tu cap nhat
     "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
-    "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
+    "allin_lev": "",                # don bay /lev cho moi lenh: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
     "update_url": DEFAULT_UPDATE_URL,
@@ -452,7 +455,7 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
                 return f"❌ {c.name}: số dư = 0"
             want = allin[1] if allin[0] == "lev" else None
             lev, real = allin_plan(avail, want, ins["maxlev"])
-            note = f" | ALL-IN vốn {avail:.2f} USDT"
+            note = f" | toàn bộ vốn {avail:.2f} USDT"
             if want and lev < want:
                 note += f" (coin chỉ cho tối đa x{lev:g})"
         else:
@@ -596,9 +599,12 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None, si
     if allin:
         mx = instruments[symbol]["maxlev"]
         lv = mx if allin[0] == "max" else min(allin[1], mx)
-        head = f"📥 [{source}] ALL-IN Long {symbol} | đòn bẩy x{lv:g} (coin max x{mx:g}) | TP +{tp:g}% | SL -{sl:g}% | {ms}ms"
+        sg = ("+", "-") if side == "Buy" else ("-", "+")
+        head = (f"{'📥' if side == 'Buy' else '📤'} [{source}] MAX {side_vn(side)} {symbol} | đòn bẩy x{lv:g} (max của coin) | "
+                f"TP {sg[0]}{tp:g}% | SL {sg[1]}{sl:g}% | {ms}ms")
         if sl and sl >= 90 / lv:
-            head += f"\n⚠️ SL -{sl:g}% xa hơn mức thanh lý ước tính (~-{100 / lv:.1f}%) — có thể bị thanh lý trước khi chạm SL"
+            head += (f"\n⚠️ SL {sg[1]}{sl:g}% xa hơn mức thanh lý ước tính (~{sg[1]}{100 / lv:.1f}%) — "
+                     "có thể bị thanh lý trước khi chạm SL")
     else:
         sg = ("+", "-") if side == "Buy" else ("-", "+")
         head = (f"{'📥' if side == 'Buy' else '📤'} [{source}] {side_vn(side)} {symbol} | size {notional:.0f} USDT | "
@@ -630,7 +636,7 @@ def order_hints(res, coin, symbol, price, tp, sl, source, allin):
         H.append(f"💡 Size tối thiểu của {symbol} là {fmt(ins['min'])} {base} ≈ {mu:g} USDT (giá {num(price)}).")
         if allin:
             lv = ins["maxlev"] if allin[0] == "max" else min(allin[1], ins["maxlev"])
-            H.append(f"   All-in ở x{lv:g} cần ít nhất ~{mu / lv * 1.1:.2f} USDT khả dụng mỗi acc. Nạp thêm hoặc tăng /lev.")
+            H.append(f"   {source} ở x{lv:g} cần ít nhất ~{mu / lv * 1.1:.2f} USDT khả dụng mỗi acc. Nạp thêm vốn vào acc.")
         elif source in ("/buy", "/sell"):
             H.append(f"   Gõ lại: {source} #{coin.lower()} {mu:g} {tp:g} {sl:g}")
         else:
@@ -1110,7 +1116,7 @@ def lev_label():
     return "chưa đặt" if not a else ("max của coin" if a[0] == "max" else f"x{a[1]:g}")
 
 
-ALLIN_RE = re.compile(r"^/allin(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
+ALLIN_RE = re.compile(r"^/(?:buyall|sellall)(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
 
 
 def parse_allin(text):
@@ -1128,8 +1134,9 @@ HELP_ITEMS = [
     ("/per", "Performance của các acc: 1 day / This week / This Month, và Position History"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
     ("/sell #coin size tp sl", "Mở Short ngay trên tất cả acc (ngược với /buy). TP khi giá giảm tp%, SL khi giá tăng sl%. Vd: /sell #eth 1000 10 2"),
-    ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
-    ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
+    ("/buyall #coin tp sl", "Mở Long toàn bộ vốn mỗi acc với đòn bẩy max của coin — size lớn nhất có thể. Vd: /buyall #evaa 10 2"),
+    ("/sellall #coin tp sl", "Mở Short toàn bộ vốn mỗi acc với đòn bẩy max của coin (ngược với /buyall). Vd: /sellall #evaa 10 2"),
+    ("/lev N", "Đặt đòn bẩy cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
     ("/help", "Hiện danh sách lệnh này"),
@@ -1898,22 +1905,24 @@ async def handle_update(u):
                 if ok:
                     cfg["allin_lev"] = arg; save_cfg()
                     log(f"⚙️ Đòn bẩy: {lev_label()} (từ Telegram)")
-                    reply = (f"⚙️ Đã đặt đòn bẩy all-in: {lev_label()} cho tất cả sub account.\n"
-                             "Áp dụng cho /buy, /allin và lệnh từ kênh. Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó; "
+                    reply = (f"⚙️ Đã đặt đòn bẩy: {lev_label()} cho tất cả sub account.\n"
+                             "Áp dụng cho /buy, /sell và lệnh từ kênh (/buyall, /sellall luôn dùng max của coin). Coin nào max thấp hơn thì tool tự hạ xuống max của coin đó; "
                              "size cần đòn bẩy cao hơn thì tool tự nâng lên.")
                 else:
                     reply = f"Đòn bẩy hiện tại: {lev_label()}\nDùng: /lev 10 (từ 1 đến 200) hoặc /lev max"
-            elif cmd == "/allin":
+            elif cmd in ("/buyall", "/sellall"):
                 a = parse_allin(m.get("text") or "")
-                st = allin_setting()
-                if not a:
-                    reply = ("Sai cú pháp. Dùng: /allin #coin tp sl\n"
-                             "Ví dụ: /allin #evaa 10 2 → all-in Long EVAAUSDT, TP +10%, SL -2%")
-                elif not st:
-                    reply = "Chưa đặt đòn bẩy all-in. Gõ /lev 10 (hoặc /lev max để dùng max của coin) rồi gửi lại /allin."
+                if not a and cmd == "/buyall":
+                    reply = ("Sai cú pháp. Dùng: /buyall #coin tp sl\n"
+                             "Ví dụ: /buyall #evaa 10 2 → Long EVAAUSDT toàn bộ vốn ở đòn bẩy max, TP +10%, SL -2%")
+                elif not a:
+                    reply = ("Sai cú pháp. Dùng: /sellall #coin tp sl\n"
+                             "Ví dụ: /sellall #evaa 10 2 → Short EVAAUSDT toàn bộ vốn ở đòn bẩy max, "
+                             "TP khi giá giảm 10%, SL khi giá tăng 2%")
                 else:
-                    log(f"🛒 /allin {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
-                    await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
+                    log(f"🛒 {cmd} {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
+                    await execute_order(a["coin"], 0, a["tp"], a["sl"], cmd, allin=("max",),
+                                        side="Buy" if cmd == "/buyall" else "Sell")
                     return
             elif cmd == "/per":
                 asyncio.create_task(per_send(chat, "d"))
@@ -2144,7 +2153,8 @@ def selftest():
     """Chay boi ban cu truoc khi thay file: ban moi phai tu chay duoc cac ham chinh."""
     assert parse_command("m #space 1 10 2") == {"coin": "SPACE", "size": 1, "tp": 10, "sl": 2}
     assert parse_buy("/sell #eth 500 5 1")["size"] == 500
-    assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/allin #x 1 2")["coin"] == "X"
+    assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/buyall #x 1 2")["coin"] == "X"
+    assert parse_allin("/sellall #x 1 2")["sl"] == 2 and parse_allin("/allin #x 1 2") is None
     assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
     global clients
     clients = [Bybit("Acc1", "k", "s", "x")]
@@ -2314,7 +2324,7 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
     <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Rich message (bảng biểu)</option><option value="0">Chữ thường</option></select>
     <label>Đòn bẩy cho mọi lệnh (số, hoặc max = max của coin; trống = tự tính thấp nhất)</label><input id="allin_lev" placeholder="chưa đặt">
-    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /lev N · /allin #coin tp sl · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
+    <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /buyall #coin tp sl · /sellall #coin tp sl · /lev N · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 
   <div class="card"><h2>Update</h2>

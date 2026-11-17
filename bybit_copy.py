@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.18.1"
+VERSION = "1.19.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.19.0", ["Chat gọn hơn: gõ /status, /per, /update, /start, /stop, /help thì tin cũ của chính lệnh đó (cả tin bạn gõ và tin bot trả lời) tự bị xoá, chỉ giữ bản mới nhất",
+                "Bảng /status tự gửi sau khi vào lệnh cũng thay thế bảng /status cũ"]),
     ("1.18.1", ["Close Custom Size: tiêu đề ghi rõ đã đóng bao nhiêu và còn lại bao nhiêu; mỗi acc ghi \"Đóng X · còn Y\"",
                 "Sau khi đóng, bot gửi luôn bảng /status mới để thấy position còn lại"]),
     ("1.18.0", ["Close Order có thêm nút Close Custom Size: hiện Total Size của cả 5 acc, bạn gõ số USDT muốn đóng, tool chia đều cho các acc",
@@ -1767,11 +1769,42 @@ def live_stop(why=""):
         save_cfg()
 
 
-async def start_live(chat):
+async def tg_delete(chat, mids):
+    """Xoa cac tin trong chat (tin cua bot va tin lenh ban go). -> True neu xoa duoc het."""
+    mids = sorted({int(x) for x in mids if x})
+    if not mids or not chat:
+        return True
+    r = await bot_api("deleteMessages", _quiet=True, chat_id=chat, message_ids=mids[:100])
+    if r.get("ok"):
+        return True
+    ok = True
+    for x in mids:                     # Bot API cu chua co deleteMessages -> xoa tung tin
+        r = await bot_api("deleteMessage", _quiet=True, chat_id=chat, message_id=x)
+        ok = ok and bool(r.get("ok"))
+    return ok
+
+
+def track_new(key, chat, *mids, also_old=()):
+    """Bat dau nhom tin moi cho lenh key (/status, /per, /update, /start...) va xoa nhom tin cu cua lenh do."""
+    tr = cfg.setdefault("msg_track", {})
+    old = tr.get(key) or {}
+    tr[key] = {"chat": str(chat), "mids": [int(m) for m in mids if m]}
+    save_cfg()
+    gone = [m for m in (old.get("mids") or []) + list(also_old) if m and int(m) not in tr[key]["mids"]]
+    if gone:
+        asyncio.create_task(tg_delete(old.get("chat") or str(chat), gone))
+
+
+def track_add(key, chat, *mids):
+    tr = cfg.setdefault("msg_track", {})
+    g = tr.setdefault(key, {"chat": str(chat), "mids": []})
+    g["mids"] += [int(m) for m in mids if m]
+    save_cfg()
+
+
+async def start_live(chat, user_mid=None):
     old = (live["chat"], live["mid"], live["rich"])
     live_stop()
-    if old[1]:                         # danh dau tin cu la da ngung
-        asyncio.create_task(live_edit(*old, final=True))
     live["confirm"] = None
     live["menu"] = None
     live["view"] = "hb"                        # moi tin /status mac dinh la Health Bar
@@ -1782,6 +1815,9 @@ async def start_live(chat):
                     sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + "|0")   # "|0": chua kem bieu do
         cfg["live_msg"] = [chat, mid, rich]
         save_cfg()
+        track_new("status", chat, mid, user_mid, also_old=[old[1]] if str(old[0]) == str(chat) else [])
+    elif old[1]:                       # khong gui duoc tin moi -> giu tin cu, danh dau da ngung
+        asyncio.create_task(live_edit(*old, final=True))
 
 
 async def live_edit(chat, mid, rich, final=False):
@@ -2539,7 +2575,7 @@ def photo_paused():
     return time.time() < live.get("photo_off_until", 0)
 
 
-async def per_send(chat, kind):
+async def per_send(chat, kind, user_mid=None):
     text, blocks, kb, png = await per_build(kind)
     photo_mid = None
     if png:
@@ -2550,7 +2586,9 @@ async def per_send(chat, kind):
                                {"chart": png})
             if r.get("ok"):
                 botst["rich_photo"] = True
-                per_msgs[(r.get("result") or {}).get("message_id")] = {"mode": "inline"}
+                pm = (r.get("result") or {}).get("message_id")
+                per_msgs[pm] = {"mode": "inline"}
+                track_new("per", chat, pm, user_mid)
                 return
             desc = str(r.get("description"))
             if not _net_err(desc):
@@ -2564,6 +2602,7 @@ async def per_send(chat, kind):
     mid, _ = await _send_rich(chat, text, blocks, kb)
     if mid:
         per_msgs[mid] = {"mode": "sep", "photo": photo_mid}
+    track_new("per", chat, mid, photo_mid, user_mid)
     while len(per_msgs) > 30:
         per_msgs.pop(next(iter(per_msgs)))
 
@@ -2659,11 +2698,12 @@ async def bot_loop():
                 if note and cfg["bot_owner_id"]:
                     m_old = re.search(r"(\d+(?:\.\d+)+) →", note)
                     if note.startswith("⬆️") and m_old:
-                        send_rich(cfg["bot_owner_id"],
-                                  *changelog_msg(f"⬆️ Đã cập nhật v{m_old.group(1)} → v{VERSION}",
-                                                 changelog_since(m_old.group(1))))
+                        rm, _ = await _send_rich(cfg["bot_owner_id"],
+                                                 *changelog_msg(f"⬆️ Đã cập nhật v{m_old.group(1)} → v{VERSION}",
+                                                                changelog_since(m_old.group(1))))
                     else:
-                        send(cfg["bot_owner_id"], note)
+                        rm, _ = await _send(cfg["bot_owner_id"], note)
+                    track_add("update", cfg["bot_owner_id"], rm)
                     cfg["update_note"] = ""
                     save_cfg()
             botst.update(ok=True, err="", last=time.time())
@@ -2719,21 +2759,24 @@ async def handle_update(u):
                     else:
                         await cc_close(chat, amount)
                     return
+            umid = m.get("message_id")
             if cmd == "/start":
                 cfg["running"] = True; save_cfg(); log("▶️ Start (từ Telegram)")
-                send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_blocks("▶️ Bot đã chạy"))
+                rm, _ = await _send_rich(chat, "▶️ Bot ĐÃ CHẠY\n" + status_text(), status_blocks("▶️ Bot đã chạy"))
+                track_new("start", chat, rm, umid)
                 return
             elif cmd == "/stop":
                 cfg["running"] = False; save_cfg(); log("⏸ Stop (từ Telegram)")
-                send_rich(chat, "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)\n" + status_text(),
-                          status_blocks("⏸ Bot đã dừng"))
+                rm, _ = await _send_rich(chat, "⏸ Bot ĐÃ DỪNG (các position đang mở vẫn giữ nguyên)\n" + status_text(),
+                                         status_blocks("⏸ Bot đã dừng"))
+                track_new("start", chat, rm, umid)
                 return
             elif cmd == "/close":
                 log("🛑 Close all (từ Telegram)")
                 send_rich(chat, *(await close_all()))
                 return
             elif cmd == "/status":
-                asyncio.create_task(start_live(chat))
+                asyncio.create_task(start_live(chat, umid))
                 return
             elif cmd == "/lev":
                 arg = (m.get("text") or "").split()[1:2]
@@ -2774,15 +2817,20 @@ async def handle_update(u):
                                         side="Buy" if cmd == "/buyall" else "Sell")
                     return
             elif cmd == "/per":
-                asyncio.create_task(per_send(chat, "d"))
+                asyncio.create_task(per_send(chat, "d", umid))
                 return
             elif cmd == "/update":
                 log("⬆️ /update (từ Telegram)")
+                track_new("update", chat, umid)            # xoa tin /update cu ngay tu dau
                 ok, msg, rs = await do_update("lệnh /update")
                 if ok and not rs:      # dang la ban moi nhat -> gui change log cua ban hien tai
-                    send_rich(chat, *changelog_msg(f"✅ Đang là bản mới nhất — v{VERSION}", changelog_since()))
+                    rm, _ = await _send_rich(chat, *changelog_msg(f"✅ Đang là bản mới nhất — v{VERSION}", changelog_since()))
+                    track_add("update", chat, rm)
                     return
                 reply = ("⬆️ " if ok else "⚠️ ") + msg + ("\nBot sẽ gửi change log sau vài giây." if rs else "")
+                rm, _ = await _send(chat, reply)
+                track_add("update", chat, rm)
+                return
             elif cmd in ("/buy", "/sell"):
                 b = parse_buy(m.get("text") or "")
                 if not b and cmd == "/buy":
@@ -2797,7 +2845,8 @@ async def handle_update(u):
                                         side="Buy" if cmd == "/buy" else "Sell")
                     return   # ket qua da duoc gui qua notify()
             else:
-                send_rich(chat, HELP_TEXT, help_blocks())
+                rm, _ = await _send_rich(chat, HELP_TEXT, help_blocks())
+                track_new("help", chat, rm, umid)
                 return
             send(chat, reply)
 
@@ -2806,7 +2855,7 @@ async def handle_update(u):
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note", "realized")}
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note", "realized", "msg_track")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
     c["has_bot_token"] = bool(cfg["bot_token"])

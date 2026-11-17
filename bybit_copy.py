@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.14.1"
+VERSION = "1.14.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.14.2", ["/status bỏ dòng Chế độ · Đòn bẩy cho gọn"]),
     ("1.14.1", ["Lệnh bị từ chối vì size nhỏ hơn mức tối thiểu: tin lỗi có nút Open Minimum Order — mở lại đúng lệnh đó (coin, Long/Short, TP, SL) với size tối thiểu",
                 "Size tối thiểu tính cả bước khối lượng của sàn + 3% dự phòng giá chạy, nên lệnh theo gợi ý không còn bị từ chối"]),
     ("1.14.0", ["Sau khi /buy, /sell, /buyall, /sellall (và lệnh từ kênh) vào lệnh thành công, bot tự gửi bảng /status ngay bên dưới — không cần gõ /status",
@@ -950,8 +951,7 @@ async def close_all():
 
 
 def status_text():
-    lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
-             f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy: {lev_label()}"]
+    lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'}"]
     rl = realized_lines()
     if rl:
         lines += [rl[0] + ":", "   " + rl[1], "   " + rl[2]]
@@ -978,9 +978,7 @@ def status_text():
 
 def status_blocks(title=None, stamp=None):
     run = cfg["running"]
-    blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}"),
-              r_par(["Chế độ: ", B("Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"),
-                     " · Đòn bẩy: ", B(lev_label())])]
+    blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}")]
     rl = realized_lines()
     if rl:
         rz = cfg["realized"]

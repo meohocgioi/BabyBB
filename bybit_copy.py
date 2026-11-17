@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.6.2", ["Realized PnL chỉ hiện khi còn position đang mở; đóng hết thì kết quả cả đợt nằm trong tin báo đóng",
+               "Nút Close Partial Position chỉ hiện khi có position đang mở"]),
     ("1.6.1", ["Bảng /status gọn hơn: No Position, Avai, Last Update; bỏ dòng chú thích phí",
                "Realized PnL: dòng trên đổi tên thành PnL (đã gồm phí)"]),
     ("1.6.0", ["Tin /status có nút đóng một phần position: 10% / 30% / 50% / 70% / 100% (bấm xong phải Xác nhận)",
@@ -784,10 +786,14 @@ def add_realized(rows):
     save_cfg()
 
 
-def realized_lines():
-    """3 dong Realized PnL (hoac [] neu chua chot gi)."""
+def has_pos():
+    return any((status.get(c.name) or {}).get("positions") for c in clients)
+
+
+def realized_lines(always=False):
+    """3 dong Realized PnL cua dot position dang mo (hoac [] neu khong co gi de hien)."""
     rz = cfg.get("realized") or {}
-    if not rz.get("n"):
+    if not rz.get("n") or not (always or has_pos()):
         return []
     lab = "PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)"
     return ["Realized PnL", f"{lab} = {dot(rz['pnl'])} {rz['pnl']:+.4f} USDT",
@@ -827,6 +833,7 @@ async def close_all():
     finally:
         busy["n"] -= 1
     rows = [x for sub in res for x in sub]
+    prev_n = (cfg.get("realized") or {}).get("n", 0)
     add_realized(rows)
     if not rows:
         log("Không có position nào đang mở")
@@ -864,6 +871,13 @@ async def close_all():
         blocks.append(r_foot(note))
     for e in errs:
         blocks.append(r_par(e))
+    rl = realized_lines(always=True)
+    if prev_n and rl and done:         # truoc do da dong 1 phan -> bao tong ca dot
+        rz = cfg["realized"]
+        T.append(f"Cả đợt (gồm các lần đóng một phần): {rl[1]} | {rl[2]}")
+        blocks.append(r_table(["Cả đợt (gồm các lần đóng một phần)", "USDT"],
+                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])} {rz['pnl']:+.4f}")],
+                               ["Total fee", B(f"{rz['fee']:.4f}")]], [None, "right"]))
     return "\n".join(T), blocks
 
 
@@ -950,6 +964,11 @@ async def status_loop():
             if clients:
                 await asyncio.gather(*(one(c) for c in clients))
             n += 1
+            if clients and not busy["n"] and (cfg.get("realized") or {}).get("n") and not has_pos() \
+                    and all((status.get(c.name) or {}).get("t", 0) > time.time() - 10 and
+                            not (status.get(c.name) or {}).get("error") for c in clients):
+                cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}   # dot position da dong het
+                save_cfg()
             if n % 20 == 0:    # ~1 phut: dong ho may co the bi Windows chinh lai bat cu luc nao
                 await sync_time()
             if n % 200 == 0:   # ~10 phut
@@ -1177,6 +1196,8 @@ CONFIRM_SECS = 15
 
 def live_kb():
     """Ban phim duoi tin /status: chon % -> hien nut Xac nhan trong 15 giay."""
+    if not has_pos():
+        return None
     cf = live.get("confirm")
     if cf and cf[1] > time.time():
         return {"inline_keyboard": [
@@ -1228,6 +1249,10 @@ async def handle_callback(cq):
         live["confirm"] = None
         log(f"✂️ Đóng {pct}% position (nút dưới /status)")
         await answer(f"Đang đóng {pct}%…")
+        if pct == 100:
+            send_rich(live["chat"] or cfg["bot_owner_id"], *(await close_all()))
+            live_refresh_now()
+            return
         msg = await close_partial(pct)
         live_refresh_now()
         if "Lỗi" in msg or "Không có" in msg:
@@ -1267,8 +1292,9 @@ async def start_live(chat):
 async def live_edit(chat, mid, rich, final=False):
     stamp = "⏹ Đã ngừng cập nhật — xem tin /status mới hơn" if final else live_stamp()
     p = {"chat_id": chat, "message_id": mid}
-    if not final:
-        p["reply_markup"] = live_kb()      # sua tin ma khong gui kem thi Telegram xoa mat nut
+    kb = None if final else live_kb()
+    if kb:
+        p["reply_markup"] = kb             # sua tin ma khong gui kem thi Telegram xoa mat nut
     if rich:
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
     else:
@@ -1680,7 +1706,7 @@ def selftest():
          "lev": "1", "idx": 0, "fee": 0.01}]}
     json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0")), live_kb()])
     cfg["realized"] = {"pnl": -0.5, "fee": 0.1, "n": 1}
-    assert len(realized_lines()) == 3 and "Realized PnL" in status_text()
+    assert len(realized_lines()) == 3 and "Realized PnL" in status_text() and live_kb()
     cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}
     assert CHANGELOG[0][0] == VERSION, "CHANGELOG thieu ban hien tai"
     assert status_text() and HELP_TEXT and "__VERSION__" in HTML and chan_norm() is not None

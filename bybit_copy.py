@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.8.0", ["Lệnh /per — performance của các acc với nút 1 day / This week / This Month",
+               "Nút Position History — 5 position đóng gần nhất, gộp cả các acc"]),
     ("1.7.0", ["Lệnh /sell #coin size tp sl — mở Short (ngược với /buy): TP khi giá giảm tp%, SL khi giá tăng sl%"]),
     ("1.6.2", ["Realized PnL chỉ hiện khi còn position đang mở; đóng hết thì kết quả cả đợt nằm trong tin báo đóng",
                "Nút Close Partial Position chỉ hiện khi có position đang mở"]),
@@ -55,7 +57,7 @@ def changelog_msg(title, entries):
 
 import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlencode, urlparse
 
@@ -1109,6 +1111,7 @@ HELP_ITEMS = [
     ("/start", "Chạy bot — bắt đầu nghe lệnh từ kênh"),
     ("/stop", "Dừng bot — position đang mở giữ nguyên"),
     ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục"),
+    ("/per", "Performance của các acc: 1 day / This week / This Month, và Position History"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
     ("/sell #coin size tp sl", "Mở Short ngay trên tất cả acc (ngược với /buy). TP khi giá giảm tp%, SL khi giá tăng sl%. Vd: /sell #eth 1000 10 2"),
     ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
@@ -1229,6 +1232,12 @@ async def handle_callback(cq):
     mid = (cq.get("message") or {}).get("message_id")
     if data == "noop":
         return await answer()
+    if data == "ph" or data.startswith("pf:"):
+        kind = "h" if data == "ph" else data[3:]
+        if kind not in ("d", "w", "m", "h"):
+            return await answer()
+        await answer("Đang tải…")
+        return await per_edit((cq.get("message") or {}).get("chat", {}).get("id") or cfg["bot_owner_id"], mid, kind)
     if mid != live["mid"]:
         return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
     if data == "no":
@@ -1342,6 +1351,170 @@ async def live_loop():
 
 def send_rich(chat, text, blocks):
     asyncio.create_task(_send_rich(chat, text, blocks))
+
+
+# --- /per: performance + lich su position (lay tu lich su dong lenh cua Bybit) ---
+PER_LABEL = {"d": "1 day", "w": "This week", "m": "This Month"}
+_per_cache = {}            # (ten acc, start_ms) -> (luc lay, records)
+WEEK_MS = 7 * 86400 * 1000
+
+
+def per_start(kind):
+    """Moc bat dau (ms, gio Bybit) + mo ta."""
+    now = datetime.now()
+    if kind == "d":
+        t, desc = time.time() - 86400, "24 giờ qua"
+    elif kind == "w":
+        d0 = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        t, desc = d0.timestamp(), f"từ thứ Hai {d0.strftime('%d/%m')}"
+    else:
+        d0 = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        t, desc = d0.timestamp(), f"từ {d0.strftime('%d/%m')}"
+    return int(t * 1000) + time_offset, desc
+
+
+async def fetch_closed(c, start_ms):
+    """Moi lan dong lenh cua 1 acc tu start_ms toi gio. Bybit chi cho hoi toi da 7 ngay moi lan."""
+    key = (c.name, start_ms // 60000)
+    hit = _per_cache.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    end = int(time.time() * 1000) + time_offset
+    out, t = [], start_ms
+    while t < end:
+        e, cursor = min(t + WEEK_MS - 1000, end), ""
+        for _ in range(10):                # toi da 1000 ban ghi moi tuan
+            p = {"category": "linear", "startTime": str(t), "endTime": str(e), "limit": "100"}
+            if cursor:
+                p["cursor"] = cursor
+            r = await c.req("GET", "/v5/position/closed-pnl", p)
+            if r.get("retCode") != 0:
+                raise RuntimeError(str(r.get("retMsg")))
+            out += r["result"]["list"]
+            cursor = r["result"].get("nextPageCursor") or ""
+            if not cursor:
+                break
+        t = e + 1
+    _per_cache[key] = (time.time(), out)
+    return out
+
+
+def _rec(it):
+    return {"symbol": it["symbol"], "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
+            "size": float(it.get("closedSize") or it.get("qty") or 0),
+            "pnl": float(it.get("closedPnl") or 0),
+            "fee": float(it.get("openFee") or 0) + float(it.get("closeFee") or 0),
+            "t": int(it.get("updatedTime") or it.get("createdTime") or 0)}
+
+
+def per_kb(sel):
+    row = [{"text": ("• " if sel == k else "") + v, "callback_data": f"pf:{k}"} for k, v in PER_LABEL.items()]
+    return {"inline_keyboard": [row, [{"text": ("• " if sel == "h" else "") + "Position History", "callback_data": "ph"}]]}
+
+
+def per_view(kind, data, desc):
+    """data = [(ten acc, records | Exception)] -> (ban chu, blocks)"""
+    title = f"📈 Performance — {PER_LABEL[kind]}"
+    T, R = [title + f" ({desc})"], []
+    tn = tw = 0
+    tp = tf = 0.0
+    for name, recs in data:
+        if isinstance(recs, Exception):
+            T.append(f"{name}: ⚠️ {recs}")
+            R.append([B(name), f"⚠️ {str(recs)[:60]}", "", "", ""])
+            continue
+        rs = [_rec(x) for x in recs]
+        n, w = len(rs), sum(1 for x in rs if x["pnl"] > 0)
+        pnl, fee = sum(x["pnl"] for x in rs), sum(x["fee"] for x in rs)
+        tn, tw, tp, tf = tn + n, tw + w, tp + pnl, tf + fee
+        wr = f"{w / n * 100:.0f}%" if n else "—"
+        T.append(f"{name}: {n} lệnh | win {wr} | {dot(pnl)} {pnl:+.4f} USDT | fee {fee:.4f}")
+        R.append([B(name), str(n), wr, B(f"{dot(pnl)} {pnl:+.4f}"), f"{fee:.4f}"])
+    wr = f"{tw / tn * 100:.0f}%" if tn else "—"
+    T.append(f"Tổng: {tn} lệnh | win {wr} | {dot(tp)} {tp:+.4f} USDT | fee {tf:.4f}")
+    R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)} {tp:+.4f}"), B(f"{tf:.4f}")])
+    stamp = f"PnL đã gồm phí · USDT · {desc} · Last Update: {datetime.now().strftime('%H:%M:%S')}"
+    T.append(stamp)
+    blocks = [r_head(title),
+              r_table(["Acc", "Lệnh", "Win", "PnL", "Fee"], R, [None, "right", "right", "right", "right"]),
+              r_foot(stamp)]
+    return "\n".join(T), blocks
+
+
+def history_view(data, limit=5):
+    """Gop cac lan dong cung coin, cung chieu, cung luc (trong 60s) cua moi acc thanh 1 dong."""
+    recs, errs = [], []
+    for name, rs in data:
+        if isinstance(rs, Exception):
+            errs.append(f"{name}: ⚠️ {str(rs)[:60]}")
+        else:
+            recs += [dict(_rec(x), acc=name) for x in rs]
+    recs.sort(key=lambda x: -x["t"])
+    groups = []
+    for x in recs:
+        g = next((g for g in groups if g["symbol"] == x["symbol"] and g["side"] == x["side"]
+                  and abs(g["t"] - x["t"]) <= 60000), None)
+        if g is None:
+            g = {"symbol": x["symbol"], "side": x["side"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0, "accs": set()}
+            groups.append(g)
+        g["size"] += x["size"]; g["pnl"] += x["pnl"]; g["fee"] += x["fee"]; g["accs"].add(x["acc"])
+    groups = groups[:limit]
+    title = f"🧾 Position History — {len(groups)} lần đóng gần nhất"
+    T, R = [title], []
+    for g in groups:
+        when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
+        name = f"{'Buy' if g['side'] == 'Buy' else 'Sell'} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
+        T.append(f"{name} ({when}, {len(g['accs'])} acc) | size {num(g['size'])} | {dot(g['pnl'])} {g['pnl']:+.4f} USDT | fee {g['fee']:.4f}")
+        R.append([[B(name), f"\n{when} · {len(g['accs'])} acc"], num(g["size"]), B(f"{dot(g['pnl'])} {g['pnl']:+.4f}"), f"{g['fee']:.4f}"])
+    stamp = f"Gộp tất cả acc · PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
+    blocks = [r_head(title)]
+    if R:
+        blocks.append(r_table(["Position", "Size", "PnL", "Fee"], R, [None, "right", "right", "right"]))
+    else:
+        T.append("Chưa có position nào được đóng trong 30 ngày qua.")
+        blocks.append(r_par("Chưa có position nào được đóng trong 30 ngày qua."))
+    for e in errs:
+        T.append(e)
+        blocks.append(r_par(e))
+    T.append(stamp)
+    blocks.append(r_foot(stamp))
+    return "\n".join(T), blocks
+
+
+async def per_build(kind):
+    """kind: d / w / m / h -> (ban chu, blocks, ban phim)"""
+    if not clients:
+        return "Chưa cài sub account nào.", [r_par("Chưa cài sub account nào.")], per_kb(kind)
+
+    async def one(c, start):
+        try:
+            return c.name, await fetch_closed(c, start)
+        except Exception as e:
+            return c.name, e
+    if kind == "h":
+        now = int(time.time() * 1000) + time_offset
+        data = await asyncio.gather(*(one(c, now - WEEK_MS) for c in clients))
+        text, blocks = history_view(data)
+        if len(blocks[1].get("cells", [])) - 1 < 5:
+            data = await asyncio.gather(*(one(c, now - 30 * 86400 * 1000) for c in clients))   # chua du 5 -> nhin xa hon
+            text, blocks = history_view(data)
+        return text, blocks, per_kb("h")
+    start, desc = per_start(kind)
+    data = await asyncio.gather(*(one(c, start) for c in clients))
+    text, blocks = per_view(kind, data, desc)
+    return text, blocks, per_kb(kind)
+
+
+async def per_edit(chat, mid, kind):
+    text, blocks, kb = await per_build(kind)
+    r = {}
+    if cfg.get("widgets", True) and botst.get("rich") is not False:
+        r = await bot_api("editMessageText", _quiet=True, chat_id=chat, message_id=mid,
+                          rich_message={"blocks": blocks}, reply_markup=kb)
+    if not r.get("ok") and "not modified" not in str(r.get("description")):
+        r = await bot_api("editMessageText", _quiet=True, chat_id=chat, message_id=mid, text=text[:4000], reply_markup=kb)
+        if not r.get("ok") and "not modified" not in str(r.get("description")):
+            log(f"⚠️ /per: không sửa được tin ({str(r.get('description'))[:100]})")
 
 
 def send(chat, text):
@@ -1482,6 +1655,10 @@ async def handle_update(u):
                     log(f"🛒 /allin {a['coin']} {a['tp']:g} {a['sl']:g} (từ Telegram)")
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
                     return
+            elif cmd == "/per":
+                text, blocks, kb = await per_build("d")
+                asyncio.create_task(_send_rich(chat, text, blocks, kb))
+                return
             elif cmd == "/update":
                 log("⬆️ /update (từ Telegram)")
                 ok, msg, rs = await do_update("lệnh /update")
@@ -1716,6 +1893,10 @@ def selftest():
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}
     json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0")), live_kb()])
+    fake = [{"symbol": "ETHUSDT", "side": "Sell", "closedSize": "0.01", "closedPnl": "-0.01", "openFee": "0.01",
+             "closeFee": "0.01", "updatedTime": str(int(time.time() * 1000))}]
+    json.dumps([per_view("d", [("Acc1", fake), ("Acc2", RuntimeError("x"))], "x"), history_view([("Acc1", fake)]),
+                per_kb("w"), per_start("w"), per_start("m")])
     cfg["realized"] = {"pnl": -0.5, "fee": 0.1, "n": 1}
     assert len(realized_lines()) == 3 and "Realized PnL" in status_text() and live_kb()
     cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}

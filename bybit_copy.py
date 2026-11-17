@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.6.0", ["Tin /status có nút đóng một phần position: 10% / 30% / 50% / 70% / 100% (bấm xong phải Xác nhận)",
+               "Sau khi đóng, đầu tin /status hiện Realized PnL: Profit or Loss và Total fee"]),
     ("1.5.2", ["Khi lệnh lỗi, bot thêm dòng 💡 gợi ý cách sửa: size tối thiểu, size tối đa theo số dư, lỗi API key…"]),
     ("1.5.1", ["Chỉ cập nhật khi bạn gõ /update (hoặc bấm nút trên tool) — bỏ tự động cập nhật",
                "/update trả về change log dạng rich message"]),
@@ -78,6 +80,7 @@ DEFAULT_CFG = {
     "custom_tp": 10,                # %
     "custom_sl": 2,                 # %
     "update_note": "",              # tin bao se gui qua bot sau khi khoi dong lai
+    "realized": {"pnl": 0.0, "fee": 0.0, "n": 0},   # PnL da chot cua dot position hien tai
     "live_msg": None,               # [chat, message_id, rich] cua tin /status dang tu cap nhat
     "widgets": True,                # True = bot gui Rich Message (bang bieu), False = chu thuong
     "allin_lev": "",                # don bay cho /allin: "" chua dat | so | "max"
@@ -549,6 +552,8 @@ async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
 async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
     """Mo Long coin voi gia tri position = notional USDT tren tat ca sub account."""
     t0 = t0 or time.time()
+    if (cfg.get("realized") or {}).get("n") and not any((status.get(c.name) or {}).get("positions") for c in clients):
+        cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}     # dot position moi -> tinh lai tu dau
     cmd = {"coin": coin.upper()}
     if not clients:
         msg = "❌ Chưa cài sub account nào\n💡 Mở tool trên máy, dán apikey=apisecret của từng sub vào ô Sub account rồi bấm Lưu."
@@ -702,21 +707,37 @@ def side_vn(side):
     return "Long" if side == "Buy" else "Short"
 
 
-async def close_one(c):
-    """Dong moi position cua 1 acc, tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
+async def close_one(c, pct=100):
+    """Dong pct% moi position cua 1 acc, tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
     rows = []
     try:
         t_ms = int(time.time() * 1000) + time_offset - 3000
         for p in await c.positions():
+            qty = p["size"]
+            if pct < 100:
+                if p["symbol"] not in instruments:
+                    try:
+                        await load_instruments(p["symbol"])
+                    except Exception:
+                        pass
+                ins = instruments.get(p["symbol"])
+                q = floor_step(D(p["size"]) * D(pct) / 100, ins["step"]) if ins else D(0)
+                if not ins or q < ins["min"]:
+                    need = f"{fmt(ins['min'])}" if ins else "?"
+                    rows.append({"acc": c.name, "symbol": p["symbol"], "ok": False,
+                                 "err": f"{pct}% của size {p['size']} nhỏ hơn mức tối thiểu {need} — chọn % lớn hơn"})
+                    continue
+                qty = fmt(q)
             r = await c.req("POST", "/v5/order/create", {
                 "category": "linear", "symbol": p["symbol"],
                 "side": "Sell" if p["side"] == "Buy" else "Buy",
-                "orderType": "Market", "qty": p["size"],
+                "orderType": "Market", "qty": qty,
                 "reduceOnly": True, "positionIdx": p["idx"]})
             ok = r.get("retCode") == 0
-            rows.append({"acc": c.name, "symbol": p["symbol"], "side": p["side"], "size": p["size"],
+            frac = float(qty) / float(p["size"]) if float(p["size"]) else 1
+            rows.append({"acc": c.name, "symbol": p["symbol"], "side": p["side"], "size": qty,
                          "lev": p["lev"], "entry": p["avg"], "exit": None, "fee": None,
-                         "pnl": p["pnl"], "pct": p["pct"], "est": True,
+                         "pnl": p["pnl"] * frac, "pct": p["pct"], "est": True,
                          "ok": ok, "err": "" if ok else str(r.get("retMsg"))})
         want = {x["symbol"] for x in rows if x["ok"]}
         agg = {}
@@ -748,6 +769,54 @@ async def close_one(c):
     return rows
 
 
+def add_realized(rows):
+    rz = cfg.setdefault("realized", {"pnl": 0.0, "fee": 0.0, "n": 0})
+    done = [x for x in rows if x.get("ok")]
+    if not done:
+        return
+    rz["pnl"] += sum(x["pnl"] for x in done)
+    rz["fee"] += sum(x["fee"] for x in done if x.get("fee") is not None)
+    rz["n"] += 1
+    if any(x.get("est") for x in done):
+        rz["est"] = True
+    save_cfg()
+
+
+def realized_lines():
+    """3 dong Realized PnL (hoac [] neu chua chot gi)."""
+    rz = cfg.get("realized") or {}
+    if not rz.get("n"):
+        return []
+    est = " (ước tính, chưa trừ phí)" if rz.get("est") else " (đã trừ phí)"
+    return ["Realized PnL", f"Profit or Loss = {dot(rz['pnl'])} {rz['pnl']:+.4f} USDT{est}",
+            f"Total fee = {rz['fee']:.4f} USDT"]
+
+
+async def close_partial(pct):
+    """Dong pct% tat ca position (nut bam duoi tin /status). -> cau tom tat ngan"""
+    busy["n"] += 1
+    try:
+        res = await asyncio.gather(*(close_one(c, pct) for c in clients))
+    finally:
+        busy["n"] -= 1
+    rows = [x for sub in res for x in sub]
+    if not rows:
+        return "Không có position nào đang mở"
+    add_realized(rows)
+    done = [x for x in rows if x["ok"]]
+    for x in rows:
+        if x["ok"]:
+            fee = f"{x['fee']:.4f}" if x.get("fee") is not None else "—"
+            log(f"✂️ {x['acc']}: đóng {pct}% {x['symbol']} ({x['size']}) | phí {fee} | {x['pnl']:+.4f} USDT")
+        else:
+            log(f"❌ {x['acc']}: đóng {pct}% {x['symbol']} lỗi: {x['err']}")
+    errs = [x for x in rows if not x["ok"]]
+    msg = f"Đã đóng {pct}% trên {len(done)}/{len(rows)} position"
+    if errs:
+        msg += f". Lỗi: {errs[0]['acc']} — {errs[0]['err']}"
+    return msg
+
+
 async def close_all():
     """-> (ban chu, blocks cua rich message)"""
     busy["n"] += 1
@@ -756,6 +825,7 @@ async def close_all():
     finally:
         busy["n"] -= 1
     rows = [x for sub in res for x in sub]
+    add_realized(rows)
     if not rows:
         log("Không có position nào đang mở")
         return ("🛑 Không có position nào đang mở",
@@ -798,6 +868,9 @@ async def close_all():
 def status_text():
     lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'} | "
              f"{'Theo kênh' if cfg['mode'] == 'follow' else 'Custom'} | Đòn bẩy: {lev_label()}"]
+    rl = realized_lines()
+    if rl:
+        lines += [rl[0] + ":", "   " + rl[1], "   " + rl[2]]
     tot = 0.0
     for c in clients:
         st = status.get(c.name) or {}
@@ -822,6 +895,13 @@ def status_blocks(title=None, stamp=None):
     blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}"),
               r_par(["Chế độ: ", B("Theo lệnh kênh" if cfg["mode"] == "follow" else "Chỉ theo coin (custom)"),
                      " · Đòn bẩy: ", B(lev_label())])]
+    rl = realized_lines()
+    if rl:
+        rz = cfg["realized"]
+        blocks.append(r_table(["Realized PnL", "USDT"],
+                              [["Profit or Loss" + (" (ước tính)" if rz.get("est") else " (đã trừ phí)"),
+                                B(f"{dot(rz['pnl'])} {rz['pnl']:+.4f}")],
+                               ["Total fee", B(f"{rz['fee']:.4f}")]], [None, "right"]))
     R, tot, has = [], 0.0, False
     for c in clients:
         st = status.get(c.name) or {}
@@ -1054,9 +1134,10 @@ async def bot_api(method, _timeout=8, _quiet=False, **params):
     return j
 
 
-async def _send(chat, text):
+async def _send(chat, text, kb=None):
+    extra = {"reply_markup": kb} if kb else {}
     for attempt in range(1, 5):
-        r = await bot_api("sendMessage", _quiet=True, chat_id=chat, text=text[:4000])
+        r = await bot_api("sendMessage", _quiet=True, chat_id=chat, text=text[:4000], **extra)
         if r.get("ok"):
             if attempt > 1:
                 log(f"Bot đã gửi được tin sau {attempt} lần thử (mạng tới Telegram chập chờn)")
@@ -1068,11 +1149,12 @@ async def _send(chat, text):
     return None, False
 
 
-async def _send_rich(chat, text, blocks):
+async def _send_rich(chat, text, blocks, kb=None):
     """Thu gui Rich Message; khong duoc thi gui ban chu."""
+    extra = {"reply_markup": kb} if kb else {}
     if cfg.get("widgets", True) and botst.get("rich") is not False:
         for _ in range(3):
-            r = await bot_api("sendRichMessage", _quiet=True, chat_id=chat, rich_message={"blocks": blocks})
+            r = await bot_api("sendRichMessage", _quiet=True, chat_id=chat, rich_message={"blocks": blocks}, **extra)
             if r.get("ok"):
                 botst["rich"] = True
                 return (r.get("result") or {}).get("message_id"), True
@@ -1083,11 +1165,73 @@ async def _send_rich(chat, text, blocks):
                 botst["rich"] = False     # Bot API chua co sendRichMessage -> thoi khong thu nua
             log(f"Rich message bị Telegram từ chối ({desc[:120]}) — gửi bản chữ thay thế")
             break
-    return await _send(chat, text)
+    return await _send(chat, text, kb)
 
 
 # --- /status tu cap nhat: tool sua thang vao tin /status moi nhat ---
-live = {"chat": None, "mid": None, "rich": True, "sig": "", "t": 0.0, "wait": 0.0}
+live = {"chat": None, "mid": None, "rich": True, "sig": "", "t": 0.0, "wait": 0.0, "confirm": None}
+CLOSE_PCTS = [10, 30, 50, 70, 100]
+CONFIRM_SECS = 15
+
+
+def live_kb():
+    """Ban phim duoi tin /status: chon % -> hien nut Xac nhan trong 15 giay."""
+    cf = live.get("confirm")
+    if cf and cf[1] > time.time():
+        return {"inline_keyboard": [
+            [{"text": f"⚠️ Đóng {cf[0]}% TẤT CẢ position?", "callback_data": "noop"}],
+            [{"text": f"✅ Xác nhận đóng {cf[0]}%", "callback_data": f"ok:{cf[0]}"},
+             {"text": "✖ Huỷ", "callback_data": "no"}]]}
+    return {"inline_keyboard": [
+        [{"text": "Close Partial Position", "callback_data": "noop"}],
+        [{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS]]}
+
+
+def live_refresh_now():
+    live.update(sig="", t=0.0, wait=0.0)
+
+
+async def handle_callback(cq):
+    """Bam nut duoi tin /status."""
+    async def answer(text="", alert=False):
+        await bot_api("answerCallbackQuery", _quiet=True, callback_query_id=cq["id"], text=text[:190], show_alert=alert)
+    if str((cq.get("from") or {}).get("id")) != str(cfg["bot_owner_id"]).strip():
+        return await answer("Bạn không có quyền dùng bot này", True)
+    data = cq.get("data") or ""
+    mid = (cq.get("message") or {}).get("message_id")
+    if data == "noop":
+        return await answer()
+    if mid != live["mid"]:
+        return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
+    if data == "no":
+        live["confirm"] = None
+        live_refresh_now()
+        return await answer("Đã huỷ")
+    kind, _, val = data.partition(":")
+    try:
+        pct = int(val)
+    except ValueError:
+        return await answer()
+    if pct not in CLOSE_PCTS:
+        return await answer()
+    if kind == "cp":
+        live["confirm"] = (pct, time.time() + CONFIRM_SECS)
+        live_refresh_now()
+        return await answer(f"Bấm ✅ Xác nhận trong {CONFIRM_SECS} giây để đóng {pct}%")
+    if kind == "ok":
+        cf = live.get("confirm")
+        if not cf or cf[0] != pct or cf[1] < time.time():
+            live["confirm"] = None
+            live_refresh_now()
+            return await answer("Hết thời gian xác nhận — bấm lại % muốn đóng", True)
+        live["confirm"] = None
+        log(f"✂️ Đóng {pct}% position (nút dưới /status)")
+        await answer(f"Đang đóng {pct}%…")
+        msg = await close_partial(pct)
+        live_refresh_now()
+        if "Lỗi" in msg or "Không có" in msg:
+            send(live["chat"] or cfg["bot_owner_id"], "✂️ " + msg)
+
 LIVE_EVERY = 3         # giay giua 2 lan sua tin (khi so lieu thay doi)
 LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
@@ -1110,9 +1254,10 @@ async def start_live(chat):
     live_stop()
     if old[1]:                         # danh dau tin cu la da ngung
         asyncio.create_task(live_edit(*old, final=True))
-    mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()))
+    live["confirm"] = None
+    mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
     if mid:
-        live.update(chat=chat, mid=mid, rich=rich, sig=json.dumps(status_blocks(), ensure_ascii=False),
+        live.update(chat=chat, mid=mid, rich=rich, sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False),
                     t=time.time(), wait=0.0)
         cfg["live_msg"] = [chat, mid, rich]
         save_cfg()
@@ -1121,6 +1266,8 @@ async def start_live(chat):
 async def live_edit(chat, mid, rich, final=False):
     stamp = "⏹ Đã ngừng cập nhật — xem tin /status mới hơn" if final else live_stamp()
     p = {"chat_id": chat, "message_id": mid}
+    if not final:
+        p["reply_markup"] = live_kb()      # sua tin ma khong gui kem thi Telegram xoa mat nut
     if rich:
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
     else:
@@ -1140,7 +1287,9 @@ async def live_loop():
             now = time.time()
             if now < live["wait"] or now - live["t"] < LIVE_EVERY:
                 continue
-            sig = json.dumps(status_blocks(), ensure_ascii=False)
+            if live.get("confirm") and live["confirm"][1] < now:
+                live["confirm"] = None     # het han xac nhan -> tra lai hang nut %
+            sig = json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
             if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
                 continue
             r = await live_edit(live["chat"], live["mid"], live["rich"])
@@ -1188,7 +1337,7 @@ async def bot_loop():
                 botst.update(ok=False, err="")
                 await asyncio.sleep(3)
                 continue
-            p = {"timeout": 25, "allowed_updates": ["message", "channel_post"]}
+            p = {"timeout": 25, "allowed_updates": ["message", "channel_post", "callback_query"]}
             if offset:
                 p["offset"] = offset
             r = await bot_api("getUpdates", _timeout=40, _quiet=True, **p)
@@ -1230,6 +1379,9 @@ async def bot_loop():
 async def handle_update(u):
     if True:
         if True:
+            if u.get("callback_query"):
+                await handle_callback(u["callback_query"])
+                return
             cp = u.get("channel_post")
             if cp:   # bot la admin cua kenh phat lenh -> nghe truc tiep, khong can dang nhap
                 ch = cp.get("chat") or {}
@@ -1323,7 +1475,7 @@ async def handle_update(u):
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note")}
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note", "realized")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
     c["has_bot_token"] = bool(cfg["bot_token"])
@@ -1525,7 +1677,10 @@ def selftest():
     status["Acc1"] = {"balance": 1.0, "error": "", "t": 0, "positions": [
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}
-    json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0"))])
+    json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0")), live_kb()])
+    cfg["realized"] = {"pnl": -0.5, "fee": 0.1, "n": 1}
+    assert len(realized_lines()) == 3 and "Realized PnL" in status_text()
+    cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}
     assert CHANGELOG[0][0] == VERSION, "CHANGELOG thieu ban hien tai"
     assert status_text() and HELP_TEXT and "__VERSION__" in HTML and chan_norm() is not None
     print("selftest ok", VERSION)

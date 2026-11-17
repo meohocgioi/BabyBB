@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.19.0"
+VERSION = "1.20.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.20.0", ["/status gọn: 1 dòng tổng hợp cả 5 acc (tổng size, entry trung bình, PnL % trung bình, tổng uPnL)",
+                "Chi tiết từng acc nằm trong mục thu gọn — bấm \"▸ Chi tiết từng acc\" để mở / đóng"]),
     ("1.19.0", ["Chat gọn hơn: gõ /status, /per, /update, /start, /stop, /help thì tin cũ của chính lệnh đó (cả tin bạn gõ và tin bot trả lời) tự bị xoá, chỉ giữ bản mới nhất",
                 "Bảng /status tự gửi sau khi vào lệnh cũng thay thế bảng /status cũ"]),
     ("1.18.1", ["Close Custom Size: tiêu đề ghi rõ đã đóng bao nhiêu và còn lại bao nhiêu; mỗi acc ghi \"Đóng X · còn Y\"",
@@ -1229,16 +1231,44 @@ def status_blocks(title=None, stamp=None):
                           [B(f"{side_vn(p['side'])} {coin_of(p['symbol'])}"),
                            f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.0f}\nEntry {num(p['avg'])}"],
                           B(f"{p['pnl']:+.2f}")])
-    if has:
+    if has and botst.get("rich_details") is not False:
+        # Gon: 1 dong tong hop moi coin (tat ca acc), bam "Chi tiết" moi hien bang tung acc
+        S, n_acc = [], sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
+        for (sym, sd), g in status_groups().items():
+            levs = sorted({float(x) for x in g["lev"]})
+            lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
+            pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
+            S.append([[B(f"{len(g['accs'])} acc"), f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
+                      [B(f"{side_vn(sd)} {coin_of(sym)}"),
+                       f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
+                      B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
+        S.append([B("Fee"), "", B(f"{fee:.2f}")])
+        blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
+        blocks.append({"type": "details", "summary": f"▸ Chi tiết {len(clients)} sub account ({n_acc} đang có position)",
+                       "blocks": [r_table(STATUS_HEAD, R, STATUS_ALIGN)], "is_open": bool(live.get("detail"))})
+    elif has:
         R.append([B("Tổng"), "", B(f"{dot(tot)}\u00a0{tot:+.2f}")])
         R.append([B("Fee"), "", B(f"{fee:.2f}")])
-    if R:
+        blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
+    elif R:
         blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     else:
         blocks.append(r_par("Chưa cài sub account nào."))
     if stamp:
         blocks.append(r_foot(stamp))
     return blocks
+
+
+def status_groups():
+    """Gom position cua moi acc theo (coin, chieu) -> tong size, entry trung binh, tong PnL."""
+    G = {}
+    for c in clients:
+        for p in (status.get(c.name) or {}).get("positions") or []:
+            q = float(p["size"])
+            g = G.setdefault((p["symbol"], p["side"]), {"qty": 0.0, "val": 0.0, "pnl": 0.0, "lev": [], "accs": set()})
+            g["qty"] += q; g["val"] += q * p["avg"]; g["pnl"] += p["pnl"]
+            g["lev"].append(p.get("lev") or 1); g["accs"].add(c.name)
+    return G
 
 
 async def refresh_one(c):
@@ -1476,8 +1506,8 @@ async def _send(chat, text, kb=None):
     return None, False
 
 
-async def _send_rich(chat, text, blocks, kb=None):
-    """Thu gui Rich Message; khong duoc thi gui ban chu."""
+async def _send_rich(chat, text, blocks, kb=None, rebuild=None):
+    """Thu gui Rich Message; khong duoc thi gui ban chu. rebuild(): dung lai blocks khi Telegram chua nhan block details."""
     extra = {"reply_markup": kb} if kb else {}
     if cfg.get("widgets", True) and botst.get("rich") is not False:
         for _ in range(3):
@@ -1486,6 +1516,12 @@ async def _send_rich(chat, text, blocks, kb=None):
                 botst["rich"] = True
                 return (r.get("result") or {}).get("message_id"), True
             desc = str(r.get("description"))
+            if rebuild and "detail" in desc.lower() and botst.get("rich_details") is not False:
+                botst["rich_details"] = False
+                log(f"Telegram không nhận khối thu gọn ({desc[:100]}) — gửi bảng đầy đủ")
+                blocks, kb2 = rebuild()
+                extra = {"reply_markup": kb2} if kb2 else {}
+                continue
             if "Timeout" in desc or "Connect" in desc or "Disconnected" in desc:
                 continue               # loi mang -> thu lai
             if "not found" in desc.lower() or "404" in desc:
@@ -1514,6 +1550,8 @@ def live_kb():
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
     rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not photo_paused() else []
+    if botst.get("rich_details") is not False:
+        rows.append([{"text": ("▾ Ẩn chi tiết từng acc" if live.get("detail") else "▸ Chi tiết từng acc"), "callback_data": "dt"}])
     rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
     if menu == "close":
@@ -1677,6 +1715,10 @@ async def handle_callback(cq):
         live["confirm"] = None
         asyncio.create_task(answer("Đã huỷ"))
         return await kb_now()
+    if data == "dt":                           # mo / dong bang chi tiet tung acc
+        live["detail"] = not live.get("detail")
+        asyncio.create_task(answer())
+        return await edit_now()
     if data in ("v:hb", "v:c1"):              # chon Health Bar / nen 1m
         want = data[2:]
         if live_view() == want:
@@ -1746,7 +1788,7 @@ LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 def live_sig():
     return (json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
-            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}|{photo_paused()}")
+            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}|{photo_paused()}|{live.get('detail')}")
 
 
 def view_buttons():
@@ -1808,8 +1850,10 @@ async def start_live(chat, user_mid=None):
     live["confirm"] = None
     live["menu"] = None
     live["view"] = "hb"                        # moi tin /status mac dinh la Health Bar
+    live["detail"] = False                     # mac dinh: gon, an bang tung acc
     live.update(png=None, png_sym=None)
-    mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb())
+    mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb(),
+                                 rebuild=lambda: (status_blocks(stamp=live_stamp()), live_kb()))
     if mid:
         live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, photo_fail=0, photo_off_until=0,
                     sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + "|0")   # "|0": chua kem bieu do
@@ -1836,6 +1880,15 @@ async def live_edit(chat, mid, rich, final=False):
             f["reply_markup"] = kb
         r = await bot_form("editMessageText", f, {"chart": png})
         desc = str(r.get("description") or "")
+        if not r.get("ok") and "detail" in desc.lower() and botst.get("rich_details") is not False:
+            botst["rich_details"] = False      # Telegram chua co block details -> quay ve bang day du
+            log(f"/status: Telegram không nhận khối thu gọn ({desc[:100]}) — hiện bảng đầy đủ")
+            blocks, kb = status_blocks(stamp=stamp), live_kb()
+            f["rich_message"] = {"blocks": [blocks[0]] + btn + [PHOTO_BLOCK] + blocks[1:]}
+            if kb:
+                f["reply_markup"] = kb
+            r = await bot_form("editMessageText", f, {"chart": png})
+            desc = str(r.get("description") or "")
         if btn and not r.get("ok") and "button" in desc.lower():
             botst["rich_buttons"] = False      # Telegram chua nhan nut trong rich message -> dua 2 nut xuong ban phim
             log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển 2 nút xuống dưới tin")
@@ -1857,6 +1910,16 @@ async def live_edit(chat, mid, rich, final=False):
         log(f"/status: Telegram không nhận ảnh trong tin ({desc[:100]}) — tạm ẩn ảnh, thử lại sau {min(300, 30 * 2 ** (n - 1))}s")
     if rich:
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
+        r = await bot_api("editMessageText", _quiet=True, **p)
+        desc = str(r.get("description") or "")
+        if not r.get("ok") and "detail" in desc.lower() and botst.get("rich_details") is not False:
+            botst["rich_details"] = False
+            log(f"/status: Telegram không nhận khối thu gọn ({desc[:100]}) — hiện bảng đầy đủ")
+            p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
+            if not final:
+                p["reply_markup"] = live_kb() or {"inline_keyboard": []}
+            r = await bot_api("editMessageText", _quiet=True, **p)
+        return r
     else:
         p["text"] = (status_text() + "\n" + stamp)[:4000]
     return await bot_api("editMessageText", _quiet=True, **p)

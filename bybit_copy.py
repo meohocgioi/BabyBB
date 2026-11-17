@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.21.0"
+VERSION = "1.21.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.21.1", ["/status: bỏ mục thu gọn và nút Chi tiết từng acc; thay bằng nút \"▸ 5 acc\" ngay dưới bảng tổng — bấm để mở / đóng bảng từng acc, không còn tự thu lại"]),
     ("1.21.0", ["Position bị đóng ngoài tool (dính TP, SL, thanh lý, hoặc bạn đóng tay trên Bybit): bot tự báo lý do + bảng PnL đã gồm phí từng acc",
                 "Position History (/per) ghi lý do đóng của từng lần: 🏁 TP / 💀 SL / ☠️ Thanh lý / ✋ Đóng tay / 🤖 Tool"]),
     ("1.20.0", ["/status gọn: 1 dòng tổng hợp cả 5 acc (tổng size, entry trung bình, PnL % trung bình, tổng uPnL)",
@@ -1300,25 +1301,23 @@ def status_blocks(title=None, stamp=None):
                           [B(f"{side_vn(p['side'])} {coin_of(p['symbol'])}"),
                            f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.0f}\nEntry {num(p['avg'])}"],
                           B(f"{p['pnl']:+.2f}")])
-    if has and botst.get("rich_details") is not False:
+    if has:
         # Gon: 1 dong tong hop moi coin (tat ca acc), bam "Chi tiết" moi hien bang tung acc
         S, n_acc = [], sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
         for (sym, sd), g in status_groups().items():
             levs = sorted({float(x) for x in g["lev"]})
             lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
             pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
-            S.append([[B(f"{len(g['accs'])} acc"), f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
+            S.append([[B("Tổng" if len(status_groups()) == 1 else coin_of(sym)), f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
                       [B(f"{side_vn(sd)} {coin_of(sym)}"),
                        f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
                       B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
         S.append([B("Fee"), "", B(f"{fee:.2f}")])
         blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
-        blocks.append({"type": "details", "summary": f"▸ Chi tiết {len(clients)} sub account ({n_acc} đang có position)",
-                       "blocks": [r_table(STATUS_HEAD, R, STATUS_ALIGN)], "is_open": bool(live.get("detail"))})
-    elif has:
-        R.append([B("Tổng"), "", B(f"{dot(tot)}\u00a0{tot:+.2f}")])
-        R.append([B("Fee"), "", B(f"{fee:.2f}")])
-        blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
+        if botst.get("rich_buttons") is not False:      # nut "5 acc" ngay duoi bang tong (cung kieu nut 1m Candle / Health Bar)
+            blocks.append({"type": "buttons", "buttons": [acc_button(n_acc)]})
+        if live.get("detail"):
+            blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     elif R:
         blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
     else:
@@ -1326,6 +1325,11 @@ def status_blocks(title=None, stamp=None):
     if stamp:
         blocks.append(r_foot(stamp))
     return blocks
+
+
+def acc_button(n=None):
+    n = n if n is not None else sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
+    return {"text": ("▾ " if live.get("detail") else "▸ ") + f"{n} acc", "callback_data": "dt"}
 
 
 def status_groups():
@@ -1628,8 +1632,8 @@ def live_kb():
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
     rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not photo_paused() else []
-    if botst.get("rich_details") is not False:
-        rows.append([{"text": ("▾ Ẩn chi tiết từng acc" if live.get("detail") else "▸ Chi tiết từng acc"), "callback_data": "dt"}])
+    if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
+        rows.append([acc_button()])
     rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
     if menu == "close":
@@ -1970,7 +1974,7 @@ async def live_edit(chat, mid, rich, final=False):
         if btn and not r.get("ok") and "button" in desc.lower():
             botst["rich_buttons"] = False      # Telegram chua nhan nut trong rich message -> dua 2 nut xuong ban phim
             log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển 2 nút xuống dưới tin")
-            kb = live_kb()
+            kb, blocks = live_kb(), status_blocks(stamp=stamp)   # dung lai bang khong co nut trong tin
             f["rich_message"] = {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}
             if kb:
                 f["reply_markup"] = kb

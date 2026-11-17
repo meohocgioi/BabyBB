@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.17.1", ["Nút dưới /status phản hồi nhanh hơn: bấm Close Order, Edit TP & SL, chọn % … chỉ đổi hàng nút, không tải lại cả tin và ảnh",
+                "Nút 1m Candle / Health Bar đổi ảnh ngay, không chờ vòng cập nhật"]),
     ("1.17.0", ["Vào lệnh chắc hơn: thiếu ký quỹ thì tool tự nâng đòn bẩy lên max của coin, vẫn thiếu thì giảm dần size — không còn báo lỗi bỏ dở",
                 "Mạng tới Bybit chập chờn: tool tự gửi lại lệnh ngay, có mã chống trùng nên không bao giờ vào 2 lệnh"]),
     ("1.16.2", ["Vào thêm lệnh vào position đang mở cùng coin: tool tính đòn bẩy trên cả position và không hạ đòn bẩy, hết lỗi \"ab not enough for new leverage\"",
@@ -1434,6 +1436,41 @@ async def set_tpsl_all(kind, pct):
     return head + "\n" + "\n".join(res)
 
 
+_live_lock = []                 # 1 lan sua tin /status tai 1 thoi diem (vong cap nhat va nut bam khong de len nhau)
+
+
+def live_lock():
+    if not _live_lock:
+        _live_lock.append(asyncio.Lock())    # tao trong vong lap dang chay (an toan voi Python cu)
+    return _live_lock[0]
+
+
+async def kb_now():
+    """Chi doi hang nut duoi tin /status — goi nho, khong tai lai anh -> nut phan hoi ngay."""
+    if not live["mid"]:
+        return
+    async with live_lock():
+        r = await bot_api("editMessageReplyMarkup", _quiet=True, chat_id=live["chat"], message_id=live["mid"],
+                          reply_markup=live_kb() or {"inline_keyboard": []})
+        if r.get("ok") or "not modified" in str(r.get("description")):
+            live["sig"] = live_sig()          # vong cap nhat khong can sua lai
+        else:
+            live_refresh_now()
+
+
+async def edit_now():
+    """Sua ca tin /status ngay (dung khi doi Health Bar / 1m Candle), khong cho vong cap nhat."""
+    if not live["mid"]:
+        return
+    async with live_lock():
+        sig = live_sig()
+        r = await live_edit(live["chat"], live["mid"], live["rich"])
+        if r.get("ok") or "not modified" in str(r.get("description")):
+            live.update(sig=sig, t=time.time())
+        else:
+            live_refresh_now()
+
+
 def live_refresh_now():
     live.update(sig="", t=0.0, wait=0.0)
 
@@ -1482,22 +1519,21 @@ async def handle_callback(cq):
         return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
     if data == "no":
         live["confirm"] = None
-        live_refresh_now()
-        return await answer("Đã huỷ")
+        asyncio.create_task(answer("Đã huỷ"))
+        return await kb_now()
     if data in ("v:hb", "v:c1"):              # chon Health Bar / nen 1m
         want = data[2:]
         if live_view() == want:
             return await answer()
         live["view"] = want
-        await answer("Health Bar" if want == "hb" else "1m Candle")
+        asyncio.create_task(answer("Health Bar" if want == "hb" else "1m Candle"))
         tg = chart_target()
         if tg and tg.get("entry"):
             try:
                 await render_view(tg)            # ve ngay de doi anh cung luc voi dau ✅
             except Exception as e:
                 log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
-        live_refresh_now()
-        return
+        return await edit_now()
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
         if want not in ("close", "tpsl", "tp", "sl"):
@@ -1509,8 +1545,8 @@ async def handle_callback(cq):
         else:
             live["menu"] = "tpsl" if cur == want else want
         live["confirm"] = None
-        live_refresh_now()
-        return await answer()
+        asyncio.create_task(answer())
+        return await kb_now()
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):
@@ -1536,8 +1572,8 @@ async def handle_callback(cq):
         return await answer()
     if kind == "cp":
         live["confirm"] = (pct, time.time() + CONFIRM_SECS)
-        live_refresh_now()
-        return await answer(f"Bấm ✅ Xác nhận trong {CONFIRM_SECS} giây để đóng {pct}%")
+        asyncio.create_task(answer(f"Bấm ✅ Xác nhận trong {CONFIRM_SECS} giây để đóng {pct}%"))
+        return await kb_now()
     if kind == "ok":
         cf = live.get("confirm")
         if not cf or cf[0] != pct or cf[1] < time.time():
@@ -1664,7 +1700,10 @@ async def live_loop():
             sig = live_sig()
             if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
                 continue
-            r = await live_edit(live["chat"], live["mid"], live["rich"])
+            async with live_lock():
+                if live_sig() != sig:      # nut vua bam doi tin trong luc cho -> tinh lai
+                    sig = live_sig()
+                r = await live_edit(live["chat"], live["mid"], live["rich"])
             desc = str(r.get("description") or "")
             if r.get("ok") or "not modified" in desc:
                 live.update(sig=sig, t=time.time())

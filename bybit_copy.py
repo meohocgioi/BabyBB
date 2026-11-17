@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.16.2"
+VERSION = "1.17.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.17.0", ["Vào lệnh chắc hơn: thiếu ký quỹ thì tool tự nâng đòn bẩy lên max của coin, vẫn thiếu thì giảm dần size — không còn báo lỗi bỏ dở",
+                "Mạng tới Bybit chập chờn: tool tự gửi lại lệnh ngay, có mã chống trùng nên không bao giờ vào 2 lệnh"]),
     ("1.16.2", ["Vào thêm lệnh vào position đang mở cùng coin: tool tính đòn bẩy trên cả position và không hạ đòn bẩy, hết lỗi \"ab not enough for new leverage\"",
                 "Nếu Bybit vẫn không cho đổi đòn bẩy, tin báo ghi đúng đòn bẩy thực tế của lệnh"]),
     ("1.16.1", ["Sửa lỗi Health Bar / chart 1m biến mất hẳn khỏi /status sau một lần Telegram lỗi tạm thời — giờ tự hiện lại sau ít giây",
@@ -533,6 +535,25 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
         d = 1 if side == "Buy" else -1     # Long: TP tren, SL duoi. Short: nguoc lai
         order = {"category": "linear", "symbol": symbol, "side": side,
                  "orderType": "Market", "qty": fmt(qty), "positionIdx": 0}
+        n_try = [0]
+
+        async def create(body):
+            """Gui lenh; mang chap chon -> gui lai 1 lan voi orderLinkId moi lan dat khac nhau nhung
+            giu nguyen giua 2 lan gui cua CUNG mot lan dat -> Bybit tu chan trung, khong bao gio vao 2 lenh."""
+            n_try[0] += 1
+            body = {**body, "orderLinkId": f"bb{os.urandom(8).hex()}{n_try[0]}"}
+            for k in range(2):
+                try:
+                    r = await c.req("POST", "/v5/order/create", body)
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    if k:
+                        return {"retCode": -1, "retMsg": f"mạng tới Bybit lỗi: {type(e).__name__}"}
+                    await asyncio.sleep(0.15)
+                    continue
+                if k and (r.get("retCode") == 110072 or "duplicate" in str(r.get("retMsg", "")).lower()):
+                    return {"retCode": 0, "retMsg": "OK"}       # lan gui truoc da toi Bybit va da vao lenh
+                return r
+            return {"retCode": -1, "retMsg": "mạng tới Bybit lỗi"}
         tpsl = {}
         if tp:
             tpsl["takeProfit"] = fmt(round_tick(D(price) * (1 + d * D(tp) / 100), ins["tick"]))
@@ -542,13 +563,13 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             tpsl["tpslMode"] = "Full"
 
         async def place():
-            r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
+            r = await create({**order, **tpsl})
             if r.get("retCode") != 0 and "position idx" in str(r.get("retMsg", "")).lower():
                 order["positionIdx"] = 1 if side == "Buy" else 2   # tai khoan dang o hedge mode
-                r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
-            if r.get("retCode") != 0 and tpsl and lev_task is None:
+                r = await create({**order, **tpsl})
+            if r.get("retCode") != 0 and tpsl and lev_task is None and not short_margin(r):
                 # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
-                r = await c.req("POST", "/v5/order/create", order)
+                r = await create(order)
             return r
 
         r = await place()
@@ -558,11 +579,35 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             lev_task = None
             if r.get("retCode") != 0 and not lev_err:
                 r = await place()          # lenh den truoc khi don bay kip doi -> gui lai
-        if r.get("retCode") != 0 and allin and "insufficient" in str(r.get("retMsg", "")).lower():
-            real *= 0.9                # thieu ky quy -> thu lai voi 90% size
-            qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
+        # Thieu ky quy (so du vua doi, gia chay...): nang don bay len max cua coin, roi moi giam dan size
+        tries, want0, refreshed = 0, real, False
+        while r.get("retCode") != 0 and short_margin(r) and tries < 4:
+            tries += 1
+            mx = int(ins["maxlev"]) if ins["maxlev"] == int(ins["maxlev"]) else ins["maxlev"]
+            if not allin and lev < mx and not lev_err:
+                err = await set_lev(c, symbol, mx)
+                if not err:
+                    note += f" (thiếu ký quỹ → tự nâng đòn bẩy x{lev:g} → x{mx:g})"
+                    lev = mx
+                    r = await place()
+                    continue
+            if tries <= 2 and not refreshed:   # hoi lai so du that tu Bybit, tinh size vua du o don bay hien tai
+                refreshed = True
+                try:
+                    fresh = await c.balance()
+                    real = min(real * 0.98, fresh * SAFETY * float(lev) / (1 + FEE_RESERVE * float(lev)))
+                except Exception:
+                    real *= 0.9
+            else:
+                real *= 0.9
+            q2 = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
+            if q2 < ins["min"]:
+                break
+            qty = q2
             order["qty"] = fmt(qty)
             r = await place()
+        if r.get("retCode") == 0 and real < want0 - 0.01:
+            note += f" (thiếu ký quỹ → giảm size còn {float(qty) * price:.0f} USDT)"
         if r.get("retCode") != 0:
             extra = f" | đặt đòn bẩy x{lev:g} lỗi: {lev_err}" if lev_err else ""
             return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}{extra}"
@@ -576,6 +621,12 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
         return f"✅ {c.name}: {side_vn(side)} {symbol} ~{val:.2f} USDT, x{lev:g}{note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
+
+
+def short_margin(r):
+    """Bybit tu choi vi khong du ky quy / so du."""
+    m = str(r.get("retMsg", "")).lower()
+    return r.get("retCode") in (110007, 110012, 110044, 110045) or "insufficient" in m or "not enough" in m
 
 
 async def fix_tpsl(c, symbol, tp, sl, idx, side="Buy"):

@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.21.3"
+VERSION = "1.22.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.22.0", ["/status nhiều coin: mỗi coin có Health Bar / chart 1m riêng, nằm ngay trên bảng của coin đó",
+                "Close Order và Edit TP & SL: khi có nhiều coin, chọn position trước (mỗi coin 1 dòng) rồi mới chọn % / TP / SL",
+                "Nút \"▸ 5 acc\" mở chi tiết riêng cho từng coin"]),
     ("1.21.3", ["Lệnh /debug: xem tình trạng tự cập nhật của /status (lần sửa gần nhất, lỗi Telegram trả về, thời gian chờ) để tìm lỗi"]),
     ("1.21.2", ["/status: chữ \"5 acc\" trong ô bảng tổng giờ là nút bấm — bấm để mở / đóng bảng từng acc"]),
     ("1.21.1", ["/status: bỏ mục thu gọn và nút Chi tiết từng acc; thay bằng nút \"▸ 5 acc\" ngay dưới bảng tổng — bấm để mở / đóng bảng từng acc, không còn tự thu lại"]),
@@ -642,9 +645,10 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
 CC_TTL = 300                  # cho nhap size trong 5 phut
 
 
-def cc_info():
-    """Position dang mo (coin lon nhat) tren cac acc -> dict de dong theo size USDT, hoac None."""
-    tg = chart_target()
+def cc_info(symbol=None):
+    """Position dang mo cua 1 coin (mac dinh coin lon nhat) tren cac acc -> dict de dong theo size USDT, hoac None."""
+    tgs = chart_targets()
+    tg = next((t for t in tgs if t["symbol"] == symbol), None) if symbol else (tgs[0] if tgs else None)
     if not tg:
         return None
     sym, ins = tg["symbol"], instruments.get(tg["symbol"])
@@ -697,9 +701,9 @@ def cc_prompt_blocks(info, warn=None):
     return blocks
 
 
-async def cc_ask(chat, warn=None, min_btn=False):
+async def cc_ask(chat, warn=None, min_btn=False, symbol=None):
     """Gui bang mini + o nhap size (force reply)."""
-    info = cc_info()
+    info = cc_info(symbol or (live.get("cc") or {}).get("symbol"))
     if not info:
         live.pop("cc", None)
         return send(chat, "Không có position nào đang mở.")
@@ -719,7 +723,7 @@ async def cc_ask(chat, warn=None, min_btn=False):
 
 async def cc_close(chat, amount):
     """Dong amount USDT (chia deu cac acc) cua position dang mo."""
-    info = cc_info()
+    info = cc_info((live.get("cc") or {}).get("symbol"))
     if not info:
         live.pop("cc", None)
         return send(chat, "Không có position nào đang mở.")
@@ -1063,13 +1067,15 @@ def side_vn(side):
     return "Long" if side == "Buy" else "Short"
 
 
-async def close_one(c, pct=100, plan=None):
+async def close_one(c, pct=100, plan=None, only=None):
     """Dong pct% moi position cua 1 acc (hoac dung so luong trong plan = {symbol: qty}),
     tra ve list dict ket qua (co phi + PnL thuc te neu lay duoc)."""
     rows = []
     try:
         t_ms = int(time.time() * 1000) + time_offset - 3000
         for p in await c.positions():
+            if only and p["symbol"] != only:
+                continue
             qty = p["size"]
             if plan is not None:
                 if p["symbol"] not in plan:
@@ -1158,11 +1164,11 @@ def realized_lines(always=False):
             f"Total fee = {rz['fee']:.2f} USDT"]
 
 
-async def close_partial(pct):
+async def close_partial(pct, only=None):
     """Dong pct% tat ca position (nut bam duoi tin /status). -> cau tom tat ngan"""
     busy["n"] += 1
     try:
-        res = await asyncio.gather(*(close_one(c, pct) for c in clients))
+        res = await asyncio.gather(*(close_one(c, pct, only=only) for c in clients))
     finally:
         busy["n"] -= 1
     rows = [x for sub in res for x in sub]
@@ -1183,11 +1189,11 @@ async def close_partial(pct):
     return msg
 
 
-async def close_all():
-    """-> (ban chu, blocks cua rich message)"""
+async def close_all(only=None):
+    """-> (ban chu, blocks cua rich message). only = 1 coin (nut Close Order 100%); None = tat ca."""
     busy["n"] += 1
     try:
-        res = await asyncio.gather(*(close_one(c) for c in clients))
+        res = await asyncio.gather(*(close_one(c, only=only) for c in clients))
     finally:
         busy["n"] -= 1
     rows = [x for sub in res for x in sub]
@@ -1276,9 +1282,51 @@ def status_text():
     return "\n".join(lines)
 
 
-def status_blocks(title=None, stamp=None):
+def status_blocks(title=None, stamp=None, photos=None):
+    """photos = {coin: "attach://..."} -> anh Health Bar / nen 1m cua coin nam ngay tren bang cua coin do."""
     run = cfg["running"]
     blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}")]
+    G = status_groups()
+    order = sorted(G, key=lambda k: -G[k]["val"])
+    det = live.get("detail") or set()
+    for key in order:
+        sym, sd = key
+        g = G[key]
+        if photos and photos.get(sym):
+            blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
+        levs = sorted({float(x) for x in g["lev"]})
+        lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
+        pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
+        first = acc_cell(len(g["accs"]), sym) if botst.get("rich_buttons") is not False else B(f"{len(g['accs'])} acc")
+        S = [[[first, f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
+              [B(f"{side_vn(sd)} {coin_of(sym)}"), f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
+              B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")],
+             [B("Fee"), "", B(f"{g['fee']:.2f}")]]
+        blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
+        if sym in det:
+            R = []
+            for c in clients:
+                for p in (status.get(c.name) or {}).get("positions") or []:
+                    if p["symbol"] == sym:
+                        R.append([[B(c.name), f"\n{dot(p['pnl'])}\u00a0{p['pct']:+.2f}%"],
+                                  [B(f"{side_vn(p['side'])} {coin_of(p['symbol'])}"),
+                                   f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.0f}\nEntry {num(p['avg'])}"],
+                                  B(f"{p['pnl']:+.2f}")])
+            if R:
+                blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
+    # acc khong co position / dang loi
+    idle = []
+    for c in clients:
+        st = status.get(c.name) or {}
+        if st.get("error"):
+            idle.append([B(c.name), f"⚠️ {st['error']}", ""])
+        elif not st.get("positions") and not G:
+            bal = f"No Position\nAvai {st['balance']:.2f} USDT" if st.get("balance") is not None else "No Position"
+            idle.append([B(c.name), bal, ""])
+    if idle:
+        blocks.append(r_table(STATUS_HEAD, idle, STATUS_ALIGN))
+    elif not G and not clients:
+        blocks.append(r_par("Chưa cài sub account nào."))
     rl = realized_lines()
     if rl:
         rz = cfg["realized"]
@@ -1286,56 +1334,20 @@ def status_blocks(title=None, stamp=None):
                               [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
                                 B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
                                ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
-    R, tot, fee, has = [], 0.0, 0.0, False
-    for c in clients:
-        st = status.get(c.name) or {}
-        if st.get("error"):
-            R.append([B(c.name), f"⚠️ {st['error']}", ""])
-        elif not st.get("positions"):
-            bal = f"No Position\nAvai {st['balance']:.2f} USDT" if st.get("balance") is not None else "No Position"
-            R.append([B(c.name), bal, ""])
-        else:
-            for p in st["positions"]:
-                has = True
-                tot += p["pnl"]
-                fee += p.get("fee", 0) or 0
-                R.append([[B(c.name), f"\n{dot(p['pnl'])}\u00a0{p['pct']:+.2f}%"],
-                          [B(f"{side_vn(p['side'])} {coin_of(p['symbol'])}"),
-                           f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.0f}\nEntry {num(p['avg'])}"],
-                          B(f"{p['pnl']:+.2f}")])
-    if has:
-        # Gon: 1 dong tong hop moi coin (tat ca acc), bam "Chi tiết" moi hien bang tung acc
-        S, n_acc = [], sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
-        for (sym, sd), g in status_groups().items():
-            levs = sorted({float(x) for x in g["lev"]})
-            lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
-            pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
-            first = acc_cell(len(g["accs"])) if botst.get("rich_buttons") is not False else B(f"{len(g['accs'])} acc")
-            S.append([[first, f"\n{dot(g['pnl'])}\u00a0{pct:+.2f}%"],
-                      [B(f"{side_vn(sd)} {coin_of(sym)}"),
-                       f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
-                      B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
-        S.append([B("Fee"), "", B(f"{fee:.2f}")])
-        blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
-        if live.get("detail"):
-            blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
-    elif R:
-        blocks.append(r_table(STATUS_HEAD, R, STATUS_ALIGN))
-    else:
-        blocks.append(r_par("Chưa cài sub account nào."))
     if stamp:
         blocks.append(r_foot(stamp))
     return blocks
 
 
-def acc_button(n=None):
-    n = n if n is not None else sum(1 for c in clients if (status.get(c.name) or {}).get("positions"))
-    return {"text": ("▾ " if live.get("detail") else "▸ ") + f"{n} acc", "callback_data": "dt"}
+def acc_button(n, sym):
+    on = sym in (live.get("detail") or set())
+    return {"text": ("▾ " if on else "▸ ") + (f"{n} acc" if botst.get("rich_buttons") is not False else f"{n} acc {coin_of(sym)}"),
+            "callback_data": f"dt:{sym}"}
 
 
-def acc_cell(n):
-    """Chu "5 acc" trong o bang la 1 nut bam (rich text kieu button) -> mo / dong bang tung acc."""
-    return {"type": "button", "button": acc_button(n)}
+def acc_cell(n, sym):
+    """Chu "5 acc" trong o bang la 1 nut bam (rich text kieu button) -> mo / dong bang tung acc cua coin do."""
+    return {"type": "button", "button": acc_button(n, sym)}
 
 
 def status_groups():
@@ -1344,8 +1356,8 @@ def status_groups():
     for c in clients:
         for p in (status.get(c.name) or {}).get("positions") or []:
             q = float(p["size"])
-            g = G.setdefault((p["symbol"], p["side"]), {"qty": 0.0, "val": 0.0, "pnl": 0.0, "lev": [], "accs": set()})
-            g["qty"] += q; g["val"] += q * p["avg"]; g["pnl"] += p["pnl"]
+            g = G.setdefault((p["symbol"], p["side"]), {"qty": 0.0, "val": 0.0, "pnl": 0.0, "fee": 0.0, "lev": [], "accs": set()})
+            g["qty"] += q; g["val"] += q * p["avg"]; g["pnl"] += p["pnl"]; g["fee"] += p.get("fee") or 0
             g["lev"].append(p.get("lev") or 1); g["accs"].add(c.name)
     return G
 
@@ -1643,11 +1655,21 @@ def live_kb():
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
-    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("png") and not photo_paused() else []
+    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("pngs") and not photo_paused() else []
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
-        rows.append([acc_button()])
+        G = status_groups()
+        rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
     rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
              {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
+    pos = pos_list()
+    if menu and len(pos) > 1:                         # nhieu coin: chon position truoc (moi coin 1 dong)
+        sel = sel_sym()
+        if not sel:
+            for sym, sd, pnl in pos:
+                rows.append([{"text": f"{side_vn(sd)} {coin_of(sym)}   {dot(pnl)} {pnl:+.2f}", "callback_data": f"ps:{sym}"}])
+            return {"inline_keyboard": rows}
+        sd = next((x[1] for x in pos if x[0] == sel), "Buy")
+        rows.append([{"text": f"▾ {side_vn(sd)} {coin_of(sel)}  (bấm để chọn coin khác)", "callback_data": "ps:"}])
     if menu == "close":
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
         rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
@@ -1663,7 +1685,22 @@ def live_kb():
 TPSL_PCTS = (1, 3, 5, 7, 10)       # % tinh tu gia entry cua tung position
 
 
-async def set_tpsl_all(kind, pct):
+def pos_list():
+    """[(coin, chieu, tong uPnL)] cac position dang mo, size lon truoc."""
+    G = status_groups()
+    return [(k[0], k[1], G[k]["pnl"]) for k in sorted(G, key=lambda k: -G[k]["val"])]
+
+
+def sel_sym():
+    """Coin dang chon de Close / Edit TP & SL. Chi 1 coin -> tu chon coin do."""
+    pos = pos_list()
+    if len(pos) == 1:
+        return pos[0][0]
+    sel = live.get("sel")
+    return sel if any(x[0] == sel for x in pos) else None
+
+
+async def set_tpsl_all(kind, pct, only=None):
     """Dat lai TP (kind='tp') hoac SL (kind='sl') = entry ± pct% cho moi position tren moi acc; pct = 0 -> go bo.
     -> ban tom tat"""
     busy["n"] += 1
@@ -1673,6 +1710,8 @@ async def set_tpsl_all(kind, pct):
             try:
                 for p in await c.positions():
                     sym = p["symbol"]
+                    if only and sym != only:
+                        continue
                     if sym not in instruments:
                         try:
                             await load_instruments(sym)
@@ -1817,11 +1856,14 @@ async def handle_callback(cq):
     if data in ("cc", "ccm"):
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         if data == "cc":
+            sym = sel_sym()
+            if not sym:
+                return await answer("Chọn position trước", True)
             asyncio.create_task(answer())
             live["menu"] = None
             asyncio.create_task(kb_now())
-            return await cc_ask(chat)
-        info = cc_info()
+            return await cc_ask(chat, symbol=sym)
+        info = cc_info((live.get("cc") or {}).get("symbol"))
         if not info or not live.get("cc"):
             return await answer("Hết hạn — bấm lại Close Custom Size", True)
         asyncio.create_task(answer(f"Đang đóng {info['min']:.2f} USDT…"))
@@ -1833,8 +1875,11 @@ async def handle_callback(cq):
         live["confirm"] = None
         asyncio.create_task(answer("Đã huỷ"))
         return await kb_now()
-    if data == "dt":                           # mo / dong bang chi tiet tung acc
-        live["detail"] = not live.get("detail")
+    if data.startswith("dt"):                  # mo / dong bang chi tiet tung acc cua 1 coin
+        sym = data[3:]
+        det = set(live.get("detail") or set())
+        det.symmetric_difference_update({sym})
+        live["detail"] = det
         asyncio.create_task(answer())
         return await edit_now()
     if data in ("v:hb", "v:c1"):              # chon Health Bar / nen 1m
@@ -1843,13 +1888,17 @@ async def handle_callback(cq):
             return await answer()
         live["view"] = want
         asyncio.create_task(answer("Health Bar" if want == "hb" else "1m Candle"))
-        tg = chart_target()
-        if tg and tg.get("entry"):
+        tgs = [t for t in chart_targets() if t.get("entry")]
+        if tgs:
             try:
-                await render_view(tg)            # ve ngay de doi anh cung luc voi dau ✅
+                await render_view(tgs)           # ve ngay de doi anh cung luc voi dau ✅
             except Exception as e:
                 log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
         return await edit_now()
+    if data.startswith("ps:"):                 # chon position cho Close Order / Edit TP & SL
+        live["sel"] = data[3:] or None
+        asyncio.create_task(answer())
+        return await kb_now()
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
         if want not in ("close", "tpsl", "tp", "sl"):
@@ -1858,6 +1907,8 @@ async def handle_callback(cq):
             live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
         elif want == "close":
             live["menu"] = None if cur == "close" else "close"
+        if want in ("close", "tpsl") and live["menu"] in ("close", "tpsl"):
+            live["sel"] = None                 # mo menu moi -> chon lai position
         else:
             live["menu"] = "tpsl" if cur == want else want
         live["confirm"] = None
@@ -1867,13 +1918,18 @@ async def handle_callback(cq):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):
             return await answer()
+        if not sel_sym():
+            return await answer("Chọn position trước", True)
         if int(val):
             await answer(f"Đang đặt {kind.upper()} {val}% từ entry…")
             log(f"🎯 Đặt {kind.upper()} {val}% từ entry (nút dưới /status)")
         else:
             await answer(f"Đang gỡ {kind.upper()}…")
             log(f"🧹 Gỡ {kind.upper()} (nút dưới /status)")
-        msg = await set_tpsl_all(kind, int(val))
+        sym = sel_sym()
+        if not sym:
+            return await answer("Chọn position trước", True)
+        msg = await set_tpsl_all(kind, int(val), sym)
         live["menu"] = "tpsl"
         live.update(png_sym=None)              # ve lai chart voi vach TP/SL moi
         live_refresh_now()
@@ -1887,15 +1943,18 @@ async def handle_callback(cq):
     if pct not in CLOSE_PCTS:
         return await answer()
     if kind in ("cp", "ok"):                   # bam % la dong ngay, khong hoi xac nhan (gia chay nhanh)
+        sym = sel_sym()
+        if not sym:
+            return await answer("Chọn position trước", True)
         live["confirm"] = None
         live["menu"] = None
-        log(f"✂️ Đóng {pct}% position (nút dưới /status)")
-        asyncio.create_task(answer(f"Đang đóng {pct}%…"))
+        log(f"✂️ Đóng {pct}% {sym} (nút dưới /status)")
+        asyncio.create_task(answer(f"Đang đóng {pct}% {coin_of(sym)}…"))
         if pct == 100:
-            send_rich(live["chat"] or cfg["bot_owner_id"], *(await close_all()))
+            send_rich(live["chat"] or cfg["bot_owner_id"], *(await close_all(sym)))
             live_refresh_now()
             return
-        msg = await close_partial(pct)
+        msg = await close_partial(pct, sym)
         live_refresh_now()
         if "Lỗi" in msg or "Không có" in msg:
             send(live["chat"] or cfg["bot_owner_id"], "✂️ " + msg)
@@ -1906,7 +1965,7 @@ LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 def live_sig():
     return (json.dumps([status_blocks(), live_kb()], ensure_ascii=False)
-            + f"|{live.get('png_v', 0) if live.get('png') else 0}|{live_view()}|{photo_paused()}|{live.get('detail')}")
+            + f"|{live.get('png_v', 0) if live.get('pngs') else 0}|{live_view()}|{photo_paused()}|{sorted(live.get('detail') or [])}|{live.get('sel')}")
 
 
 def view_buttons():
@@ -1968,8 +2027,9 @@ async def start_live(chat, user_mid=None):
     live["confirm"] = None
     live["menu"] = None
     live["view"] = "hb"                        # moi tin /status mac dinh la Health Bar
-    live["detail"] = False                     # mac dinh: gon, an bang tung acc
-    live.update(png=None, png_sym=None)
+    live["detail"] = set()                     # mac dinh: gon, an bang tung acc
+    live["sel"] = None
+    live.update(pngs=None, png_sym=None)
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb(),
                                  rebuild=lambda: (status_blocks(stamp=live_stamp()), live_kb()))
     if mid:
@@ -1988,33 +2048,36 @@ async def live_edit(chat, mid, rich, final=False):
     kb = None if final else live_kb()
     if kb:
         p["reply_markup"] = kb             # sua tin ma khong gui kem thi Telegram xoa mat nut
-    png = None if final else live.get("png")
-    if rich and png and not photo_paused():         # kem Health Bar / nen 1m ngay duoi tieu de
-        blocks = status_blocks(stamp=stamp)
+    pngs = None if final else live.get("pngs")
+    if rich and pngs and not photo_paused():        # kem Health Bar / nen 1m tren bang cua tung coin
+        names = {sym: f"c{i}" for i, sym in enumerate(pngs)}
+        files = {names[sym]: im for sym, im in pngs.items()}
+        photos = {sym: f"attach://{n}" for sym, n in names.items()}
+        blocks = status_blocks(stamp=stamp, photos=photos)
         btn = [] if botst.get("rich_buttons") is False else [{"type": "buttons", "buttons": view_buttons()}]
         f = {"chat_id": str(chat), "message_id": str(mid),
-             "rich_message": {"blocks": [blocks[0]] + btn + [PHOTO_BLOCK] + blocks[1:]}}
+             "rich_message": {"blocks": [blocks[0]] + btn + blocks[1:]}}
         if kb:
             f["reply_markup"] = kb
-        r = await bot_form("editMessageText", f, {"chart": png})
+        r = await bot_form("editMessageText", f, files)
         desc = str(r.get("description") or "")
         if not r.get("ok") and "detail" in desc.lower() and botst.get("rich_details") is not False:
             botst["rich_details"] = False      # Telegram chua co block details -> quay ve bang day du
             log(f"/status: Telegram không nhận khối thu gọn ({desc[:100]}) — hiện bảng đầy đủ")
-            blocks, kb = status_blocks(stamp=stamp), live_kb()
-            f["rich_message"] = {"blocks": [blocks[0]] + btn + [PHOTO_BLOCK] + blocks[1:]}
+            blocks, kb = status_blocks(stamp=stamp, photos=photos), live_kb()
+            f["rich_message"] = {"blocks": [blocks[0]] + btn + blocks[1:]}
             if kb:
                 f["reply_markup"] = kb
-            r = await bot_form("editMessageText", f, {"chart": png})
+            r = await bot_form("editMessageText", f, files)
             desc = str(r.get("description") or "")
         if btn and not r.get("ok") and "button" in desc.lower():
             botst["rich_buttons"] = False      # Telegram chua nhan nut trong rich message -> dua 2 nut xuong ban phim
             log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển 2 nút xuống dưới tin")
-            kb, blocks = live_kb(), status_blocks(stamp=stamp)   # dung lai bang khong co nut trong tin
-            f["rich_message"] = {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}
+            kb, blocks = live_kb(), status_blocks(stamp=stamp, photos=photos)   # dung lai bang khong co nut trong tin
+            f["rich_message"] = {"blocks": blocks}
             if kb:
                 f["reply_markup"] = kb
-            r = await bot_form("editMessageText", f, {"chart": png})
+            r = await bot_form("editMessageText", f, files)
             desc = str(r.get("description") or "")
         if r.get("ok") or "not modified" in desc:
             live["photo_fail"] = 0
@@ -2065,7 +2128,7 @@ async def live_loop():
                 continue
             if live.get("confirm") and live["confirm"][1] < now:
                 live["confirm"] = None     # het han xac nhan -> tra lai hang nut %
-            if busy["n"] and live.get("png"):
+            if busy["n"] and live.get("pngs"):
                 continue                   # dang vao/dong lenh: khong tai anh len luc nay
             sig = live_sig()
             if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
@@ -2476,7 +2539,13 @@ def render_health(tg, price, W=900, H=210):
 
 
 def chart_target():
-    """Coin de ve: coin co tong size (USDT) lon nhat trong cac position dang mo. -> dict | None"""
+    """Coin co tong size lon nhat (giu cho cac cho chi can 1 coin). -> dict | None"""
+    t = chart_targets()
+    return t[0] if t else None
+
+
+def chart_targets():
+    """Moi coin dang mo 1 dict (tong cac acc), coin size lon nhat dung truoc."""
     agg = {}
     for c in clients:
         for p in (status.get(c.name) or {}).get("positions") or []:
@@ -2491,14 +2560,15 @@ def chart_target():
                         a[k].append(v)
             except Exception:
                 continue
-    if not agg:
-        return None
-    sym, a = max(agg.items(), key=lambda kv: kv[1]["usd"])
     avg = lambda xs: sum(xs) / len(xs) if xs else None
-    side = max(a["side"], key=a["side"].get)
-    entry = a["val"] / a["qty"] if a["qty"] else None
-    est = entry + a["pnl"] / a["qty"] * (1 if side == "Buy" else -1) if entry else None
-    return {"symbol": sym, "side": side, "entry": entry, "tp": avg(a["tp"]), "sl": avg(a["sl"]), "est": est}
+    out = []
+    for sym, a in sorted(agg.items(), key=lambda kv: -kv[1]["usd"]):
+        side = max(a["side"], key=a["side"].get)
+        entry = a["val"] / a["qty"] if a["qty"] else None
+        est = entry + a["pnl"] / a["qty"] * (1 if side == "Buy" else -1) if entry else None
+        out.append({"symbol": sym, "side": side, "entry": entry, "tp": avg(a["tp"]), "sl": avg(a["sl"]), "est": est,
+                    "usd": a["usd"]})
+    return out
 
 
 def chart_png(tg, candles):
@@ -2529,26 +2599,39 @@ def cur_price(tg):
     return tg.get("est") or tg["entry"]
 
 
-def set_png(png, key):
-    if png != live.get("png"):
-        live.update(png=png, png_v=live.get("png_v", 0) + 1)
+def set_pngs(pngs, key):
+    if pngs != live.get("pngs"):
+        live.update(pngs=pngs, png_v=live.get("png_v", 0) + 1)
     live["png_sym"] = key
 
 
-async def render_view(tg):
-    """Ve anh theo che do dang chon cho tin /status. Health bar: ve ngay (khong can mang). Nen 1m: lay nen tu Bybit."""
+async def render_one(tg):
+    """1 anh cho 1 coin theo che do dang chon. Health bar: ve ngay. Nen 1m: lay nen tu Bybit."""
     if live_view() == "hb":
-        png = await asyncio.to_thread(render_health, tg, cur_price(tg))
-        set_png(png, ("hb", tg["symbol"]))
-        return
+        return await asyncio.to_thread(render_health, tg, cur_price(tg))
     candles = await fetch_candles(tg["symbol"])
     if len(candles) < 2:
-        return
+        return (live.get("pngs") or {}).get(tg["symbol"])
     px = cur_price(tg)
     t, o, h, l, _ = candles[-1]              # nen cuoi theo gia moi nhat
     candles[-1] = (t, o, max(h, px), min(l, px), px)
-    png = await asyncio.to_thread(chart_png, tg, candles)
-    set_png(png, ("c1", tg["symbol"]))
+    return await asyncio.to_thread(chart_png, tg, candles)
+
+
+async def render_view(tgs):
+    """Ve anh cho moi coin dang mo (moi coin 1 Health Bar / 1 chart nen)."""
+    if isinstance(tgs, dict):
+        tgs = [tgs]
+    imgs = await asyncio.gather(*(render_one(tg) for tg in tgs), return_exceptions=True)
+    old = live.get("pngs") or {}
+    pngs = {}
+    for tg, im in zip(tgs, imgs):
+        if isinstance(im, Exception):
+            log(f"chart /status {tg['symbol']}: {type(im).__name__}: {str(im)[:80]}")
+            im = old.get(tg["symbol"])
+        if im:
+            pngs[tg["symbol"]] = im
+    set_pngs(pngs, (live_view(), tuple(t["symbol"] for t in tgs)))
 
 
 async def chart_loop():
@@ -2558,18 +2641,18 @@ async def chart_loop():
         await asyncio.sleep(1)
         try:
             on = live["mid"] and live["rich"] and cfg["bot_token"]
-            tg = chart_target() if on else None
-            if not tg or not tg.get("entry"):
-                if live.get("png"):
-                    live.update(png=None, png_sym=None, png_v=live.get("png_v", 0) + 1)
+            tgs = [t for t in (chart_targets() if on else []) if t.get("entry")]
+            if not tgs:
+                if live.get("pngs"):
+                    live.update(pngs=None, png_sym=None, png_v=live.get("png_v", 0) + 1)
                 nxt = 0.0
                 continue
             now = time.time()
-            key = (live_view(), tg["symbol"]) if live_view() == "hb" else ("c1", tg["symbol"])
+            key = (live_view(), tuple(t["symbol"] for t in tgs))
             if busy["n"] or (now < nxt and live.get("png_sym") == key):
                 continue                     # dang vao/dong lenh -> nhuong duong
             nxt = now + 5                    # loi thi 5 giay sau thu lai
-            await render_view(tg)
+            await render_view(tgs)
             nxt = time.time() + (LIVE_EVERY if live_view() == "hb" else CHART_EVERY)
         except Exception as e:
             log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")

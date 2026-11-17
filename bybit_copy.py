@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.13.2"
+VERSION = "1.14.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.14.0", ["Sau khi /buy, /sell, /buyall, /sellall (và lệnh từ kênh) vào lệnh thành công, bot tự gửi bảng /status ngay bên dưới — không cần gõ /status",
+                "Lỗi \"minimum order value\" của Bybit giờ có gợi ý size tối thiểu và lệnh gõ lại"]),
     ("1.13.2", ["Tin báo đóng position (/close, Close Order 100%) gọn như bảng /status: 3 cột, PnL % dưới tên acc, tên coin rút gọn, Size làm tròn, dòng Fee ở cuối"]),
     ("1.13.1", ["Thêm nút Remove TP (dưới Edit TP) và Remove SL (dưới Edit SL) — gỡ TP/SL của mọi position trên mọi acc"]),
     ("1.13.0", ["Nút dưới /status: Close Partial Position đổi thành Close Order — bấm mới bung hàng 10/30/50/70/100%",
@@ -632,7 +634,8 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None, si
     log(head)
     for line in res:
         log(line)
-    asyncio.create_task(notify(head + "\n" + "\n".join(res)))
+    opened = any(str(x).startswith("✅") for x in res)
+    asyncio.create_task(notify_order(head + "\n" + "\n".join(res), opened))
     return head + "\n" + "\n".join(res)
 
 
@@ -650,7 +653,7 @@ def order_hints(res, coin, symbol, price, tp, sl, source, allin):
         return []
     ins, H = instruments[symbol], []
     base = symbol[:-4]
-    if "size quá nhỏ" in bad:
+    if "size quá nhỏ" in bad or "minimum order value" in bad:
         mu = min_usdt(symbol, price)
         H.append(f"💡 Size tối thiểu của {symbol} là {fmt(ins['min'])} {base} ≈ {mu:g} USDT (giá {num(price)}).")
         if allin:
@@ -1000,21 +1003,25 @@ def status_blocks(title=None, stamp=None):
     return blocks
 
 
+async def refresh_one(c):
+    """Lay lai so du + position cua 1 acc vao bang status."""
+    try:
+        bal, pos = await asyncio.gather(c.balance(), c.positions())
+        status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time(),
+                          "equity": getattr(c, "equity", None)}
+        for p in pos:
+            try:
+                lev_cache[(c.name, p["symbol"])] = float(p["lev"])
+            except Exception:
+                pass
+    except Exception as e:
+        prev = status.get(c.name) or {}
+        status[c.name] = {"balance": prev.get("balance"), "positions": prev.get("positions", []),
+                          "error": str(e)[:120]}
+
+
 async def status_loop():
-    async def one(c):
-        try:
-            bal, pos = await asyncio.gather(c.balance(), c.positions())
-            status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time(),
-                              "equity": getattr(c, "equity", None)}
-            for p in pos:
-                try:
-                    lev_cache[(c.name, p["symbol"])] = float(p["lev"])
-                except Exception:
-                    pass
-        except Exception as e:
-            prev = status.get(c.name) or {}
-            status[c.name] = {"balance": prev.get("balance"), "positions": prev.get("positions", []),
-                              "error": str(e)[:120]}
+    one = refresh_one
     n = 0
     while True:
         try:
@@ -2122,6 +2129,22 @@ def send(chat, text):
 async def notify(text):
     if cfg["bot_token"] and cfg["bot_owner_id"]:
         send(cfg["bot_owner_id"], text)
+
+
+async def notify_order(text, opened):
+    """Tin bao vao lenh; neu co it nhat 1 acc vao duoc lenh -> gui tiep bang /status (tu cap nhat) ngay ben duoi."""
+    if not (cfg["bot_token"] and cfg["bot_owner_id"]):
+        return
+    chat = cfg["bot_owner_id"]
+    await _send(chat, text)                    # cho tin ket qua gui xong de bang /status nam ngay sau no
+    if not opened:
+        return
+    try:
+        await asyncio.sleep(0.8)               # cho Bybit ghi nhan position + TP/SL vua dat
+        await asyncio.gather(*(refresh_one(c) for c in clients))
+        await start_live(chat)
+    except Exception as e:
+        log(f"⚠️ Không gửi được bảng /status sau lệnh: {type(e).__name__}: {str(e)[:100]}")
 
 
 async def tg_keepalive():

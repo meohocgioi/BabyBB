@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.8.1", ["Mọi chỗ hiện size đều tính bằng USDT (/status, /close, /per, tin vào lệnh, tin báo lỗi)",
+               "Position History ghi rõ tên acc khi không phải tất cả acc cùng đóng"]),
     ("1.8.0", ["Lệnh /per — performance của các acc với nút 1 day / This week / This Month",
                "Nút Position History — 5 position đóng gần nhất, gộp cả các acc"]),
     ("1.7.0", ["Lệnh /sell #coin size tp sl — mở Short (ngược với /buy): TP khi giá giảm tp%, SL khi giá tăng sl%"]),
@@ -463,7 +465,7 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             lev_task = asyncio.create_task(set_lev(c, symbol, lev))
         qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
         if qty < ins["min"]:
-            return f"❌ {c.name}: size quá nhỏ (min {fmt(ins['min'])})"
+            return f"❌ {c.name}: size quá nhỏ (min ≈ {min_usdt(symbol, price):g} USDT)"
         d = 1 if side == "Buy" else -1     # Long: TP tren, SL duoi. Short: nguoc lai
         order = {"category": "linear", "symbol": symbol, "side": side,
                  "orderType": "Market", "qty": fmt(qty), "positionIdx": 0}
@@ -504,7 +506,7 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
             note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
         asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"], side))
         val = float(qty) * price       # gia tri thuc sau khi lam tron so luong theo buoc cua san
-        return f"✅ {c.name}: {side_vn(side)} {symbol} {fmt(qty)} (~{val:.1f} USDT, x{lev:g}){note}"
+        return f"✅ {c.name}: {side_vn(side)} {symbol} ~{val:.1f} USDT, x{lev:g}{note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
 
@@ -734,9 +736,9 @@ async def close_one(c, pct=100):
                 ins = instruments.get(p["symbol"])
                 q = floor_step(D(p["size"]) * D(pct) / 100, ins["step"]) if ins else D(0)
                 if not ins or q < ins["min"]:
-                    need = f"{fmt(ins['min'])}" if ins else "?"
+                    need = f"~{float(ins['min']) * p['avg']:.0f} USDT" if ins else "?"
                     rows.append({"acc": c.name, "symbol": p["symbol"], "ok": False,
-                                 "err": f"{pct}% của size {p['size']} nhỏ hơn mức tối thiểu {need} — chọn % lớn hơn"})
+                                 "err": f"{pct}% của position (~{float(p['size']) * p['avg'] * pct / 100:.0f} USDT) nhỏ hơn mức tối thiểu {need} — chọn % lớn hơn"})
                     continue
                 qty = fmt(q)
             r = await c.req("POST", "/v5/order/create", {
@@ -747,6 +749,7 @@ async def close_one(c, pct=100):
             ok = r.get("retCode") == 0
             frac = float(qty) / float(p["size"]) if float(p["size"]) else 1
             rows.append({"acc": c.name, "symbol": p["symbol"], "side": p["side"], "size": qty,
+                         "usd": float(qty) * p["avg"],
                          "lev": p["lev"], "entry": p["avg"], "exit": None, "fee": None,
                          "pnl": p["pnl"] * frac, "pct": p["pct"], "est": True,
                          "ok": ok, "err": "" if ok else str(r.get("retMsg"))})
@@ -822,7 +825,7 @@ async def close_partial(pct):
     for x in rows:
         if x["ok"]:
             fee = f"{x['fee']:.4f}" if x.get("fee") is not None else "—"
-            log(f"✂️ {x['acc']}: đóng {pct}% {x['symbol']} ({x['size']}) | phí {fee} | {x['pnl']:+.4f} USDT")
+            log(f"✂️ {x['acc']}: đóng {pct}% {x['symbol']} (~{x['usd']:.2f} USDT) | phí {fee} | {x['pnl']:+.4f} USDT")
         else:
             log(f"❌ {x['acc']}: đóng {pct}% {x['symbol']} lỗi: {x['err']}")
     errs = [x for x in rows if not x["ok"]]
@@ -862,9 +865,9 @@ async def close_all():
         fee = f"{x['fee']:.4f}" if x["fee"] is not None else "—"
         tag = " (ước tính)" if x["est"] else ""
         T.append(f"{x['acc']} · {side_vn(x['side'])} {x['symbol']} x{x['lev']}\n"
-                 f"   Size {x['size']} | {px}\n"
+                 f"   Size {x['usd']:.2f} USDT | {px}\n"
                  f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
-        R.append([B(x["acc"]), [B(f"{side_vn(x['side'])} {x['symbol']}"), f" x{x['lev']}\nSize {x['size']}\n{px}"],
+        R.append([B(x["acc"]), [B(f"{side_vn(x['side'])} {x['symbol']}"), f" x{x['lev']}\nSize {x['usd']:.2f} USDT\n{px}"],
                   fee, f"{dot(x['pnl'])} {x['pct']:+.2f}%", B(f"{x['pnl']:+.4f}{'*' if x['est'] else ''}")])
         log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
     blocks = [r_head(f"🛑 Đã đóng {len(done)}/{len(rows)} position")]
@@ -906,7 +909,7 @@ def status_text():
             for p in st["positions"]:
                 tot += p["pnl"]
                 lines.append(f"{c.name}: {side_vn(p['side'])} {p['symbol']} x{p['lev']}\n"
-                             f"   Size {p['size']} | entry {num(p['avg'])} | phí {p.get('fee', 0):.4f}\n"
+                             f"   Size {float(p['size']) * p['avg']:.2f} USDT | entry {num(p['avg'])} | phí {p.get('fee', 0):.4f}\n"
                              f"   {dot(p['pnl'])} {p['pct']:+.2f}% | {p['pnl']:+.4f} USDT")
     if any((status.get(c.name) or {}).get("positions") for c in clients):
         lines.append(f"Tổng PnL đang mở: {dot(tot)} {tot:+.4f} USDT")
@@ -938,7 +941,7 @@ def status_blocks(title=None, stamp=None):
                 has = True
                 tot += p["pnl"]
                 R.append([B(c.name), [B(f"{side_vn(p['side'])} {p['symbol']}"),
-                                      f" x{p['lev']}\nSize {p['size']}\nEntry {num(p['avg'])}"],
+                                      f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.2f} USDT\nEntry {num(p['avg'])}"],
                           f"{p.get('fee', 0):.4f}", f"{dot(p['pnl'])} {p['pct']:+.2f}%", B(f"{p['pnl']:+.4f}")])
     if has:
         R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.4f}")])
@@ -1401,7 +1404,7 @@ async def fetch_closed(c, start_ms):
 
 def _rec(it):
     return {"symbol": it["symbol"], "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
-            "size": float(it.get("closedSize") or it.get("qty") or 0),
+            "size": float(it.get("cumEntryValue") or 0),     # gia tri USDT cua phan da dong, tinh theo gia entry
             "pnl": float(it.get("closedPnl") or 0),
             "fee": float(it.get("openFee") or 0) + float(it.get("closeFee") or 0),
             "t": int(it.get("updatedTime") or it.get("createdTime") or 0)}
@@ -1464,8 +1467,9 @@ def history_view(data, limit=5):
     for g in groups:
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
         name = f"{'Buy' if g['side'] == 'Buy' else 'Sell'} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
-        T.append(f"{name} ({when}, {len(g['accs'])} acc) | size {num(g['size'])} | {dot(g['pnl'])} {g['pnl']:+.4f} USDT | fee {g['fee']:.4f}")
-        R.append([[B(name), f"\n{when} · {len(g['accs'])} acc"], num(g["size"]), B(f"{dot(g['pnl'])} {g['pnl']:+.4f}"), f"{g['fee']:.4f}"])
+        who = f"{len(g['accs'])} acc" if len(g["accs"]) >= len(clients) else ", ".join(sorted(g["accs"]))
+        T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.4f} USDT | fee {g['fee']:.4f}")
+        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])} {g['pnl']:+.4f}"), f"{g['fee']:.4f}"])
     stamp = f"Gộp tất cả acc · PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     blocks = [r_head(title)]
     if R:
@@ -1893,7 +1897,7 @@ def selftest():
         {"symbol": "ETHUSDT", "side": "Buy", "size": "0.01", "avg": 1.0, "pnl": -0.1, "pct": -1.0,
          "lev": "1", "idx": 0, "fee": 0.01}]}
     json.dumps([status_blocks(stamp="x"), help_blocks(), changelog_msg("x", changelog_since("1.0.0")), live_kb()])
-    fake = [{"symbol": "ETHUSDT", "side": "Sell", "closedSize": "0.01", "closedPnl": "-0.01", "openFee": "0.01",
+    fake = [{"symbol": "ETHUSDT", "side": "Sell", "closedSize": "0.01", "cumEntryValue": "18.2", "closedPnl": "-0.01", "openFee": "0.01",
              "closeFee": "0.01", "updatedTime": str(int(time.time() * 1000))}]
     json.dumps([per_view("d", [("Acc1", fake), ("Acc2", RuntimeError("x"))], "x"), history_view([("Acc1", fake)]),
                 per_kb("w"), per_start("w"), per_start("m")])

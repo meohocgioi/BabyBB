@@ -4,10 +4,14 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.10.2"
+VERSION = "1.11.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.11.0", ["/per và Position History gọn hơn trên điện thoại: bỏ cột Fee, thêm dòng Total fee cuối bảng",
+                "Chấm 🟢/🔴 nằm cùng dòng với số PnL; Position History ghi Long/Short và số acc (vd 4 acc)",
+                "Biểu đồ balance: trục dọc không còn lặp cùng một số khi balance gần như không đổi",
+                "Tiêu đề và dòng chú thích cuối tin ngắn lại"]),
     ("1.10.2", ["Rà soát toàn bộ số hiển thị: tối đa 2 số sau dấu chấm; giá entry/exit từ 1 trở lên cũng 2 số (vd 2003.12)",
                 "Riêng giá coin dưới 1 USDT giữ 4 chữ số có nghĩa (vd 0.004321) để không bị hiện thành 0.00"]),
     ("1.10.1", ["PnL và phí hiện 2 số sau dấu chấm (vd -1.07) ở /per, Position History, /status, /close — bảng gọn hơn trên điện thoại"]),
@@ -905,7 +909,7 @@ async def close_all():
         rz = cfg["realized"]
         T.append(f"Cả đợt (gồm các lần đóng một phần): {rl[1]} | {rl[2]}")
         blocks.append(r_table(["Cả đợt (gồm các lần đóng một phần)", "USDT"],
-                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])} {rz['pnl']:+.2f}")],
+                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
                                ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
     return "\n".join(T), blocks
 
@@ -945,7 +949,7 @@ def status_blocks(title=None, stamp=None):
         rz = cfg["realized"]
         blocks.append(r_table(["Realized PnL", "USDT"],
                               [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
-                                B(f"{dot(rz['pnl'])} {rz['pnl']:+.2f}")],
+                                B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
                                ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
     R, tot, has = [], 0.0, False
     for c in clients:
@@ -1470,8 +1474,12 @@ def render_chart(points, ticks, W=900, H=420):
     t0, t1 = ticks[0][0], ticks[-1][0]
     vals = [v for _, v in points]
     lo, hi = min(vals), max(vals)
-    pad = (hi - lo) * 0.15 or max(abs(hi) * 0.005, 0.05)
+    pad = (hi - lo) * 0.15
     lo, hi = lo - pad, hi + pad
+    span = max(abs(hi) * 0.01, 0.4)          # bien do toi thieu: balance gan nhu dung yen -> duong nam ngang, moc khong lap
+    if hi - lo < span:
+        mid = (hi + lo) / 2
+        lo, hi = mid - span / 2, mid + span / 2
     X = lambda t: L + int((t - t0) / (t1 - t0) * (W - L - R))
     Y = lambda v: T + int((hi - v) / (hi - lo) * (H - T - Bm))
     dec = 2 if hi - lo < 50 else (1 if hi - lo < 500 else 0)
@@ -1549,9 +1557,9 @@ def chart_for(kind):
                for i in range(0, len(pts), k)]
     if len(pts) < 2:
         since = datetime.fromtimestamp(bal_hist[0][0]).strftime("%d/%m %H:%M") if bal_hist else "bây giờ"
-        return None, f"Biểu đồ balance: chưa đủ dữ liệu (tool ghi 5 phút/lần, bắt đầu từ {since})."
+        return None, f"Biểu đồ: chưa đủ dữ liệu (ghi 5 phút/lần từ {since})"
     since = datetime.fromtimestamp(bal_hist[0][0]).strftime("%d/%m %H:%M")
-    return render_chart(pts, ticks), f"Biểu đồ: total balance trung bình mỗi acc (USDT), ghi từ {since}."
+    return render_chart(pts, ticks), f"Biểu đồ: balance TB mỗi acc, từ {since}"
 
 
 # --- /per: performance + lich su position (lay tu lich su dong lenh cua Bybit) ---
@@ -1622,7 +1630,7 @@ def per_view(kind, data, desc):
     for name, recs in data:
         if isinstance(recs, Exception):
             T.append(f"{name}: ⚠️ {recs}")
-            R.append([B(name), f"⚠️ {str(recs)[:60]}", "", "", ""])
+            R.append([B(name), f"⚠️ {str(recs)[:60]}", "", ""])
             continue
         rs = [_rec(x) for x in recs]
         n, w = len(rs), sum(1 for x in rs if x["pnl"] > 0)
@@ -1630,14 +1638,15 @@ def per_view(kind, data, desc):
         tn, tw, tp, tf = tn + n, tw + w, tp + pnl, tf + fee
         wr = f"{w / n * 100:.0f}%" if n else "—"
         T.append(f"{name}: {n} lệnh | win {wr} | {dot(pnl)} {pnl:+.2f} USDT | fee {fee:.2f}")
-        R.append([B(name), str(n), wr, B(f"{dot(pnl)} {pnl:+.2f}"), f"{fee:.2f}"])
+        R.append([B(name), str(n), wr, B(f"{dot(pnl)}\u00a0{pnl:+.2f}")])
     wr = f"{tw / tn * 100:.0f}%" if tn else "—"
     T.append(f"Tổng: {tn} lệnh | win {wr} | {dot(tp)} {tp:+.2f} USDT | fee {tf:.2f}")
-    R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)} {tp:+.2f}"), B(f"{tf:.2f}")])
-    stamp = f"PnL đã gồm phí · USDT · {desc} · Last Update: {datetime.now().strftime('%H:%M:%S')}"
+    R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)}\u00a0{tp:+.2f}")])
+    R.append([B("Total fee"), "", "", B(f"{tf:.2f}")])
+    stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     T.append(stamp)
     blocks = [r_head(title),
-              r_table(["Acc", "Lệnh", "Win", "PnL", "Fee"], R, [None, "right", "right", "right", "right"]),
+              r_table(["Acc", "Lệnh", "Win", "PnL"], R, [None, "right", "right", "right"]),
               r_foot(stamp)]
     return "\n".join(T), blocks
 
@@ -1660,18 +1669,19 @@ def history_view(data, limit=5):
             groups.append(g)
         g["size"] += x["size"]; g["pnl"] += x["pnl"]; g["fee"] += x["fee"]; g["accs"].add(x["acc"])
     groups = groups[:limit]
-    title = f"🧾 Position History — {len(groups)} lần đóng gần nhất"
+    title = "🧾 Position History"
     T, R = [title], []
     for g in groups:
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
-        name = f"{'Buy' if g['side'] == 'Buy' else 'Sell'} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
-        who = f"{len(g['accs'])} acc" if len(g["accs"]) >= len(clients) else ", ".join(sorted(g["accs"]))
+        name = f"{side_vn(g['side'])} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
+        who = f"{len(g['accs'])} acc"
         T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.2f} USDT | fee {g['fee']:.2f}")
-        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])} {g['pnl']:+.2f}"), f"{g['fee']:.2f}"])
-    stamp = f"Gộp tất cả acc · PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
+        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
+    stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     blocks = [r_head(title)]
     if R:
-        blocks.append(r_table(["Position", "Size", "PnL", "Fee"], R, [None, "right", "right", "right"]))
+        R.append([B("Total fee"), "", B(f"{sum(g['fee'] for g in groups):.2f}")])
+        blocks.append(r_table(["Position", "Size", "PnL"], R, [None, "right", "right"]))
     else:
         T.append("Chưa có position nào được đóng trong 30 ngày qua.")
         blocks.append(r_par("Chưa có position nào được đóng trong 30 ngày qua."))
@@ -1697,7 +1707,7 @@ async def per_build(kind):
         now = int(time.time() * 1000) + time_offset
         data = await asyncio.gather(*(one(c, now - WEEK_MS) for c in clients))
         text, blocks = history_view(data)
-        if len(blocks[1].get("cells", [])) - 1 < 5:
+        if len(blocks[1].get("cells", [])) - 2 < 5:     # tru dong tieu de va dong Total fee
             data = await asyncio.gather(*(one(c, now - 30 * 86400 * 1000) for c in clients))   # chua du 5 -> nhin xa hon
             text, blocks = history_view(data)
     else:
@@ -1705,7 +1715,10 @@ async def per_build(kind):
         data = await asyncio.gather(*(one(c, start) for c in clients))
         text, blocks = per_view(kind, data, desc)
     png, note = await asyncio.to_thread(chart_for, kind)
-    blocks.append(r_foot(note))
+    if blocks and blocks[-1].get("type") == "footer":      # gop chu thich bieu do vao cung 1 dong
+        blocks[-1] = r_foot(blocks[-1]["text"] + " · " + note)
+    else:
+        blocks.append(r_foot(note))
     return text + "\n" + note, blocks, per_kb(kind), png
 
 

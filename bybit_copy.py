@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.14.0"
+VERSION = "1.14.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.14.1", ["Lệnh bị từ chối vì size nhỏ hơn mức tối thiểu: tin lỗi có nút Open Minimum Order — mở lại đúng lệnh đó (coin, Long/Short, TP, SL) với size tối thiểu",
+                "Size tối thiểu tính cả bước khối lượng của sàn + 3% dự phòng giá chạy, nên lệnh theo gợi ý không còn bị từ chối"]),
     ("1.14.0", ["Sau khi /buy, /sell, /buyall, /sellall (và lệnh từ kênh) vào lệnh thành công, bot tự gửi bảng /status ngay bên dưới — không cần gõ /status",
                 "Lỗi \"minimum order value\" của Bybit giờ có gợi ý size tối thiểu và lệnh gõ lại"]),
     ("1.13.2", ["Tin báo đóng position (/close, Close Order 100%) gọn như bảng /status: 3 cột, PnL % dưới tên acc, tên coin rút gọn, Size làm tròn, dòng Fee ở cuối"]),
@@ -628,22 +630,34 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None, si
                      "có thể bị thanh lý trước khi chạm SL")
     else:
         sg = ("+", "-") if side == "Buy" else ("-", "+")
-        head = (f"{'📥' if side == 'Buy' else '📤'} [{source}] {side_vn(side)} {symbol} | size {notional:.0f} USDT | "
+        head = (f"{'📥' if side == 'Buy' else '📤'} [{source}] {side_vn(side)} {symbol} | size {round(notional, 2):g} USDT | "
                 f"TP {sg[0]}{tp:g}% | SL {sg[1]}{sl:g}% | {ms}ms")
     res = list(res) + order_hints(res, cmd["coin"], symbol, price, tp, sl, source, allin)
     log(head)
     for line in res:
         log(line)
     opened = any(str(x).startswith("✅") for x in res)
-    asyncio.create_task(notify_order(head + "\n" + "\n".join(res), opened))
+    kb = None
+    bad = " ".join(str(x) for x in res if str(x).startswith("❌")).lower()
+    if not opened and not allin and ("size quá nhỏ" in bad or "minimum order value" in bad):
+        mu = min_usdt(symbol, price)
+        data = f"om:{'B' if side == 'Buy' else 'S'}:{cmd['coin']}:{tp:g}:{sl:g}:{int(time.time())}"
+        if len(data.encode()) <= 64:
+            kb = {"inline_keyboard": [[{"text": f"Open Minimum Order (~{mu:g} USDT)", "callback_data": data}]]}
+            res.append(f"👇 Hoặc bấm Open Minimum Order: mở lại lệnh này với size tối thiểu ~{mu:g} USDT, "
+                       f"TP {tp:g}% / SL {sl:g}% như lệnh trên (nút dùng được trong {OM_TTL // 60} phút).")
+    asyncio.create_task(notify_order(head + "\n" + "\n".join(res), opened, kb))
     return head + "\n" + "\n".join(res)
 
 
 def min_usdt(symbol, price):
     """Size USDT nho nhat de dat duoc lenh (da cong 2% du phong gia chay)."""
     ins = instruments[symbol]
-    v = max(float(ins["min"]) * price, ins.get("minval", 0)) * 1.02
-    return math.ceil(v) if v >= 10 else math.ceil(v * 10) / 10
+    px = D(str(price))
+    need = max(D(str(ins.get("minval", 0) or 0)) * D("1.03") / px, ins["min"])    # 3% du phong gia chay
+    step = ins["step"] or D(1)
+    q = (need / step).to_integral_value(rounding="ROUND_CEILING") * step      # so luong coin toi thieu, dung buoc san
+    return math.ceil(float(q * px) * 100) / 100
 
 
 def order_hints(res, coin, symbol, price, tp, sl, source, allin):
@@ -1358,6 +1372,30 @@ async def handle_callback(cq):
             return await answer()
         await answer("Đang tải…")
         return await per_edit((cq.get("message") or {}).get("chat", {}).get("id") or cfg["bot_owner_id"], mid, kind)
+    if data.startswith("om:"):
+        try:
+            _, sd, coin, tp, sl, ts = data.split(":")
+            tp, sl, ts = float(tp), float(sl), int(ts)
+        except ValueError:
+            return await answer()
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        if mid in om_used:
+            return await answer("Đã bấm nút này rồi", True)
+        if time.time() - ts > OM_TTL:
+            return await answer(f"Nút đã hết hạn ({OM_TTL // 60} phút) — gửi lại lệnh nếu vẫn muốn vào", True)
+        om_used.add(mid)
+        await bot_api("editMessageReplyMarkup", _quiet=True, chat_id=chat, message_id=mid)   # go nut khoi tin
+        symbol = await resolve_symbol(coin)
+        price = (await get_price(symbol))[0] if symbol else None
+        if not price:
+            om_used.discard(mid)
+            return await answer(f"Không lấy được giá {coin} — thử lại sau vài giây", True)
+        side = "Buy" if sd == "B" else "Sell"
+        size = min_usdt(symbol, price)       # tinh lai theo gia hien tai
+        await answer(f"Đang mở {side_vn(side)} {coin} size tối thiểu {size:g} USDT…")
+        log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
+        await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
+        return
     if mid != live["mid"]:
         return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
     if data == "no":
@@ -2131,12 +2169,16 @@ async def notify(text):
         send(cfg["bot_owner_id"], text)
 
 
-async def notify_order(text, opened):
+OM_TTL = 600              # nut Open Minimum Order het han sau 10 phut
+om_used = set()            # tin da bam Open Minimum Order (chong bam 2 lan)
+
+
+async def notify_order(text, opened, kb=None):
     """Tin bao vao lenh; neu co it nhat 1 acc vao duoc lenh -> gui tiep bang /status (tu cap nhat) ngay ben duoi."""
     if not (cfg["bot_token"] and cfg["bot_owner_id"]):
         return
     chat = cfg["bot_owner_id"]
-    await _send(chat, text)                    # cho tin ket qua gui xong de bang /status nam ngay sau no
+    await _send(chat, text, kb)                # cho tin ket qua gui xong de bang /status nam ngay sau no
     if not opened:
         return
     try:

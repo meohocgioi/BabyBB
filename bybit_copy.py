@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.17.1"
+VERSION = "1.17.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.17.2", ["Close Order: bấm 10% / 30% / 50% / 70% / 100% là đóng ngay, bỏ bước Xác nhận"]),
     ("1.17.1", ["Nút dưới /status phản hồi nhanh hơn: bấm Close Order, Edit TP & SL, chọn % … chỉ đổi hàng nút, không tải lại cả tin và ảnh",
                 "Nút 1m Candle / Health Bar đổi ảnh ngay, không chờ vòng cập nhật"]),
     ("1.17.0", ["Vào lệnh chắc hơn: thiếu ký quỹ thì tool tự nâng đòn bẩy lên max của coin, vẫn thiếu thì giảm dần size — không còn báo lỗi bỏ dở",
@@ -1570,20 +1571,11 @@ async def handle_callback(cq):
         return await answer()
     if pct not in CLOSE_PCTS:
         return await answer()
-    if kind == "cp":
-        live["confirm"] = (pct, time.time() + CONFIRM_SECS)
-        asyncio.create_task(answer(f"Bấm ✅ Xác nhận trong {CONFIRM_SECS} giây để đóng {pct}%"))
-        return await kb_now()
-    if kind == "ok":
-        cf = live.get("confirm")
-        if not cf or cf[0] != pct or cf[1] < time.time():
-            live["confirm"] = None
-            live_refresh_now()
-            return await answer("Hết thời gian xác nhận — bấm lại % muốn đóng", True)
+    if kind in ("cp", "ok"):                   # bam % la dong ngay, khong hoi xac nhan (gia chay nhanh)
         live["confirm"] = None
         live["menu"] = None
         log(f"✂️ Đóng {pct}% position (nút dưới /status)")
-        await answer(f"Đang đóng {pct}%…")
+        asyncio.create_task(answer(f"Đang đóng {pct}%…"))
         if pct == 100:
             send_rich(live["chat"] or cfg["bot_owner_id"], *(await close_all()))
             live_refresh_now()

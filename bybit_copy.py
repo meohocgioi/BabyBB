@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.7.0", ["Lệnh /sell #coin size tp sl — mở Short (ngược với /buy): TP khi giá giảm tp%, SL khi giá tăng sl%"]),
     ("1.6.2", ["Realized PnL chỉ hiện khi còn position đang mở; đóng hết thì kết quả cả đợt nằm trong tin báo đóng",
                "Nút Close Partial Position chỉ hiện khi có position đang mở"]),
     ("1.6.1", ["Bảng /status gọn hơn: No Position, Avai, Last Update; bỏ dòng chú thích phí",
@@ -425,7 +426,7 @@ async def get_price(symbol):
         return None, r.get("retMsg")
 
 
-async def open_one(c, symbol, notional, tp, sl, price, allin=None):
+async def open_one(c, symbol, notional, tp, sl, price, allin=None, side="Buy"):
     """allin = None: lenh co size. allin = ("lev", so) hoac ("max",): all-in toan bo so du."""
     ins = instruments[symbol]
     try:
@@ -461,20 +462,21 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
         qty = min(floor_step(D(real) / D(price), ins["step"]), ins["maxmkt"])
         if qty < ins["min"]:
             return f"❌ {c.name}: size quá nhỏ (min {fmt(ins['min'])})"
-        order = {"category": "linear", "symbol": symbol, "side": "Buy",
+        d = 1 if side == "Buy" else -1     # Long: TP tren, SL duoi. Short: nguoc lai
+        order = {"category": "linear", "symbol": symbol, "side": side,
                  "orderType": "Market", "qty": fmt(qty), "positionIdx": 0}
         tpsl = {}
         if tp:
-            tpsl["takeProfit"] = fmt(round_tick(D(price) * (1 + D(tp) / 100), ins["tick"]))
+            tpsl["takeProfit"] = fmt(round_tick(D(price) * (1 + d * D(tp) / 100), ins["tick"]))
         if sl:
-            tpsl["stopLoss"] = fmt(round_tick(D(price) * (1 - D(sl) / 100), ins["tick"]))
+            tpsl["stopLoss"] = fmt(round_tick(D(price) * (1 - d * D(sl) / 100), ins["tick"]))
         if tpsl:
             tpsl["tpslMode"] = "Full"
 
         async def place():
             r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
             if r.get("retCode") != 0 and "position idx" in str(r.get("retMsg", "")).lower():
-                order["positionIdx"] = 1   # tai khoan dang o hedge mode
+                order["positionIdx"] = 1 if side == "Buy" else 2   # tai khoan dang o hedge mode
                 r = await c.req("POST", "/v5/order/create", {**order, **tpsl})
             if r.get("retCode") != 0 and tpsl and lev_task is None:
                 # TP/SL bi tu choi (gia chay qua nhanh) -> vao lenh truoc, dat TP/SL sau
@@ -498,14 +500,14 @@ async def open_one(c, symbol, notional, tp, sl, price, allin=None):
             return f"❌ {c.name}: vào lệnh lỗi: {r.get('retMsg')}{extra}"
         if lev_err:
             note += f" ⚠️ đã vào lệnh nhưng đặt đòn bẩy x{lev:g} lỗi: {lev_err}"
-        asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"]))
+        asyncio.create_task(fix_tpsl(c, symbol, tp, sl, order["positionIdx"], side))
         val = float(qty) * price       # gia tri thuc sau khi lam tron so luong theo buoc cua san
-        return f"✅ {c.name}: Long {symbol} {fmt(qty)} (~{val:.1f} USDT, x{lev:g}){note}"
+        return f"✅ {c.name}: {side_vn(side)} {symbol} {fmt(qty)} (~{val:.1f} USDT, x{lev:g}){note}"
     except Exception as e:
         return f"❌ {c.name}: {e}"
 
 
-async def fix_tpsl(c, symbol, tp, sl, idx):
+async def fix_tpsl(c, symbol, tp, sl, idx, side="Buy"):
     """Sau khi khop: dat lai TP/SL chinh xac theo gia entry thuc te."""
     if not tp and not sl:
         return
@@ -513,15 +515,16 @@ async def fix_tpsl(c, symbol, tp, sl, idx):
     for _ in range(6):
         await asyncio.sleep(0.4)
         try:
-            pos = [p for p in await c.positions() if p["symbol"] == symbol and p["side"] == "Buy"]
+            d = 1 if side == "Buy" else -1
+            pos = [p for p in await c.positions() if p["symbol"] == symbol and p["side"] == side]
             if not pos or not pos[0]["avg"]:
                 continue
             avg = D(pos[0]["avg"])
             body = {"category": "linear", "symbol": symbol, "tpslMode": "Full", "positionIdx": idx}
             if tp:
-                body["takeProfit"] = fmt(round_tick(avg * (1 + D(tp) / 100), ins["tick"]))
+                body["takeProfit"] = fmt(round_tick(avg * (1 + d * D(tp) / 100), ins["tick"]))
             if sl:
-                body["stopLoss"] = fmt(round_tick(avg * (1 - D(sl) / 100), ins["tick"]))
+                body["stopLoss"] = fmt(round_tick(avg * (1 - d * D(sl) / 100), ins["tick"]))
             r = await c.req("POST", "/v5/position/trading-stop", body)
             if r.get("retCode") in (0, 34040):
                 return
@@ -545,15 +548,15 @@ async def execute_signal(text, source="telegram", t0=None):
     return await execute_order(cmd["coin"], notional, tp, sl, source, t0)
 
 
-async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
+async def execute_order(coin, notional, tp, sl, source, t0=None, allin=None, side="Buy"):
     busy["n"] += 1
     try:
-        return await _execute_order(coin, notional, tp, sl, source, t0, allin)
+        return await _execute_order(coin, notional, tp, sl, source, t0, allin, side)
     finally:
         busy["n"] -= 1
 
 
-async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
+async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None, side="Buy"):
     """Mo Long coin voi gia tri position = notional USDT tren tat ca sub account."""
     t0 = t0 or time.time()
     if (cfg.get("realized") or {}).get("n") and not any((status.get(c.name) or {}).get("positions") for c in clients):
@@ -575,7 +578,7 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
         msg = f"❌ Không lấy được giá {symbol}: {perr}\n💡 Thường do mạng tới Bybit chập chờn: gửi lại lệnh sau vài giây."
         log(msg); asyncio.create_task(notify(msg))
         return msg
-    res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin) for c in clients))
+    res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin, side) for c in clients))
     ms = int((time.time() - t0) * 1000)
     if allin:
         mx = instruments[symbol]["maxlev"]
@@ -584,7 +587,9 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
         if sl and sl >= 90 / lv:
             head += f"\n⚠️ SL -{sl:g}% xa hơn mức thanh lý ước tính (~-{100 / lv:.1f}%) — có thể bị thanh lý trước khi chạm SL"
     else:
-        head = f"📥 [{source}] Long {symbol} | size {notional:.0f} USDT | TP +{tp:g}% | SL -{sl:g}% | {ms}ms"
+        sg = ("+", "-") if side == "Buy" else ("-", "+")
+        head = (f"{'📥' if side == 'Buy' else '📤'} [{source}] {side_vn(side)} {symbol} | size {notional:.0f} USDT | "
+                f"TP {sg[0]}{tp:g}% | SL {sg[1]}{sl:g}% | {ms}ms")
     res = list(res) + order_hints(res, cmd["coin"], symbol, price, tp, sl, source, allin)
     log(head)
     for line in res:
@@ -613,8 +618,8 @@ def order_hints(res, coin, symbol, price, tp, sl, source, allin):
         if allin:
             lv = ins["maxlev"] if allin[0] == "max" else min(allin[1], ins["maxlev"])
             H.append(f"   All-in ở x{lv:g} cần ít nhất ~{mu / lv * 1.1:.2f} USDT khả dụng mỗi acc. Nạp thêm hoặc tăng /lev.")
-        elif source == "/buy":
-            H.append(f"   Gõ lại: /buy #{coin.lower()} {mu:g} {tp:g} {sl:g}")
+        elif source in ("/buy", "/sell"):
+            H.append(f"   Gõ lại: {source} #{coin.lower()} {mu:g} {tp:g} {sl:g}")
         else:
             unit = float(cfg["size_unit"]) or 1
             H.append(f"   Lệnh kênh cần size ≥ {mu / unit:g} (1 = {unit:g} USDT), hoặc đổi sang chế độ Custom với size ≥ {mu:g} USDT.")
@@ -1105,6 +1110,7 @@ HELP_ITEMS = [
     ("/stop", "Dừng bot — position đang mở giữ nguyên"),
     ("/status", "Xem position, phí và PnL từng acc — tin tự cập nhật liên tục"),
     ("/buy #coin size tp sl", "Mở Long ngay trên tất cả acc. size = USDT, tp/sl = % so với entry. Vd: /buy #eth 1000 10 2"),
+    ("/sell #coin size tp sl", "Mở Short ngay trên tất cả acc (ngược với /buy). TP khi giá giảm tp%, SL khi giá tăng sl%. Vd: /sell #eth 1000 10 2"),
     ("/lev N", "Đặt đòn bẩy cho mọi lệnh (/buy, /allin, lệnh kênh). Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/allin #coin tp sl", "All-in toàn bộ vốn mỗi acc với đòn bẩy /lev (tự hạ nếu coin không cho). Vd: /allin #evaa 10 2"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
@@ -1119,7 +1125,7 @@ def help_blocks():
             r_table(["Lệnh", "Tác dụng"], [[K(c), d] for c, d in HELP_ITEMS])]
 
 
-BUY_RE = re.compile(r"^/buy(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
+BUY_RE = re.compile(r"^/(?:buy|sell)(?:@\w+)?\s+#?([A-Za-z0-9]+)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s*$", re.I)
 
 
 def parse_buy(text):
@@ -1483,14 +1489,18 @@ async def handle_update(u):
                     send_rich(chat, *changelog_msg(f"✅ Đang là bản mới nhất — v{VERSION}", changelog_since()))
                     return
                 reply = ("⬆️ " if ok else "⚠️ ") + msg + ("\nBot sẽ gửi change log sau vài giây." if rs else "")
-            elif cmd == "/buy":
+            elif cmd in ("/buy", "/sell"):
                 b = parse_buy(m.get("text") or "")
-                if not b:
+                if not b and cmd == "/buy":
                     reply = ("Sai cú pháp. Dùng: /buy #coin size tp sl\n"
                              "Ví dụ: /buy #eth 1000 10 2 → Long ETHUSDT 1000 USDT, TP +10%, SL -2%")
+                elif not b:
+                    reply = ("Sai cú pháp. Dùng: /sell #coin size tp sl\n"
+                             "Ví dụ: /sell #eth 1000 10 2 → Short ETHUSDT 1000 USDT, TP khi giá giảm 10%, SL khi giá tăng 2%")
                 else:
-                    log(f"🛒 /buy {b['coin']} {b['size']:g} {b['tp']:g} {b['sl']:g} (từ Telegram)")
-                    await execute_order(b["coin"], b["size"], b["tp"], b["sl"], "/buy")
+                    log(f"🛒 {cmd} {b['coin']} {b['size']:g} {b['tp']:g} {b['sl']:g} (từ Telegram)")
+                    await execute_order(b["coin"], b["size"], b["tp"], b["sl"], cmd,
+                                        side="Buy" if cmd == "/buy" else "Sell")
                     return   # ket qua da duoc gui qua notify()
             else:
                 send_rich(chat, HELP_TEXT, help_blocks())
@@ -1697,6 +1707,7 @@ async def clear_pending_later():
 def selftest():
     """Chay boi ban cu truoc khi thay file: ban moi phai tu chay duoc cac ham chinh."""
     assert parse_command("m #space 1 10 2") == {"coin": "SPACE", "size": 1, "tp": 10, "sl": 2}
+    assert parse_buy("/sell #eth 500 5 1")["size"] == 500
     assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/allin #x 1 2")["coin"] == "X"
     assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
     global clients

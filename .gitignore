@@ -5,3 +5,4 @@ tg_session*
 __pycache__/
 update_pending
 bybit_copy_new.py
+balance_log.csv

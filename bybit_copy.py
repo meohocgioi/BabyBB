@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.9.0", ["/per có biểu đồ đường: total balance trung bình của các acc (1 day: mốc 4 giờ; week/month: mốc theo ngày)",
+               "Tool tự ghi balance mỗi 5 phút để vẽ biểu đồ (dữ liệu bắt đầu từ bản này)"]),
     ("1.8.1", ["Mọi chỗ hiện size đều tính bằng USDT (/status, /close, /per, tin vào lệnh, tin báo lỗi)",
                "Position History ghi rõ tên acc khi không phải tất cả acc cùng đóng"]),
     ("1.8.0", ["Lệnh /per — performance của các acc với nút 1 day / This week / This Month",
@@ -57,7 +59,7 @@ def changelog_msg(title, entries):
               r_table(["Bản", "Thay đổi"], [[B(f"v{v}"), "\n".join(f"• {c}" for c in ch)] for v, ch in entries])]
     return "\n".join(T), blocks
 
-import asyncio, hashlib, hmac, html as htmllib, json, math, os, re, sys, time, webbrowser
+import asyncio, hashlib, hmac, html as htmllib, json, struct, zlib, math, os, re, sys, time, webbrowser
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -264,6 +266,13 @@ class Bybit:
         if r.get("retCode") != 0:
             raise RuntimeError(r.get("retMsg"))
         a = r["result"]["list"][0]
+        self.equity = None
+        for k in ("totalEquity", "totalWalletBalance"):      # total balance (gom ca PnL dang mo)
+            try:
+                self.equity = float(a.get(k))
+                break
+            except (TypeError, ValueError):
+                continue
         for k in ("totalAvailableBalance", "totalWalletBalance", "totalEquity"):
             try:
                 return float(a.get(k))
@@ -958,7 +967,8 @@ async def status_loop():
     async def one(c):
         try:
             bal, pos = await asyncio.gather(c.balance(), c.positions())
-            status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time()}
+            status[c.name] = {"balance": bal, "positions": pos, "error": "", "t": time.time(),
+                              "equity": getattr(c, "equity", None)}
             for p in pos:
                 try:
                     lev_cache[(c.name, p["symbol"])] = float(p["lev"])
@@ -979,6 +989,7 @@ async def status_loop():
                             not (status.get(c.name) or {}).get("error") for c in clients):
                 cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}   # dot position da dong het
                 save_cfg()
+            record_balance()
             if n % 20 == 0:    # ~1 phut: dong ho may co the bi Windows chinh lai bat cu luc nao
                 await sync_time()
             if n % 200 == 0:   # ~10 phut
@@ -1356,6 +1367,182 @@ def send_rich(chat, text, blocks):
     asyncio.create_task(_send_rich(chat, text, blocks))
 
 
+# --- Nhat ky balance (de ve bieu do trong /per) ---
+BAL_LOG = os.path.join(BASE_DIR, "balance_log.csv")
+BAL_EVERY = 300            # ghi 5 phut 1 lan
+bal_hist = []              # [(unix_ts, total balance trung binh cua cac acc)]
+
+
+def load_balance_log():
+    bal_hist.clear()
+    try:
+        cutoff = time.time() - 45 * 86400
+        with open(BAL_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    t, v = line.strip().split(",")[:2]
+                    if float(t) >= cutoff:
+                        bal_hist.append((float(t), float(v)))
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"Không đọc được balance_log.csv: {e}")
+
+
+def record_balance():
+    """Goi moi vong status: ghi trung binh total balance neu MOI acc deu vua co so lieu tot."""
+    if not clients or (bal_hist and time.time() - bal_hist[-1][0] < BAL_EVERY):
+        return
+    vals = []
+    for c in clients:
+        st = status.get(c.name) or {}
+        if st.get("error") or st.get("equity") is None or time.time() - st.get("t", 0) > 15:
+            return                     # thieu 1 acc -> bo qua de duong bieu do khong bi tut gia
+        vals.append(st["equity"])
+    pt = (time.time(), sum(vals) / len(vals))
+    bal_hist.append(pt)
+    try:
+        with open(BAL_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{pt[0]:.0f},{pt[1]:.4f}\n")
+    except Exception as e:
+        log(f"Không ghi được balance_log.csv: {e}")
+
+
+# Font 5x7 cho chu so va vai ky tu, de ve nhan truc ma khong can thu vien ngoai
+_FONT = {
+    "0": "01110 10001 10011 10101 11001 10001 01110", "1": "00100 01100 00100 00100 00100 00100 01110",
+    "2": "01110 10001 00001 00010 00100 01000 11111", "3": "11110 00001 00001 01110 00001 00001 11110",
+    "4": "00010 00110 01010 10010 11111 00010 00010", "5": "11111 10000 11110 00001 00001 10001 01110",
+    "6": "00110 01000 10000 11110 10001 10001 01110", "7": "11111 00001 00010 00100 01000 01000 01000",
+    "8": "01110 10001 10001 01110 10001 10001 01110", "9": "01110 10001 10001 01111 00001 00010 01100",
+    ".": "00000 00000 00000 00000 00000 01100 01100", ":": "00000 01100 01100 00000 01100 01100 00000",
+    "/": "00001 00001 00010 00100 01000 10000 10000", "-": "00000 00000 00000 11111 00000 00000 00000",
+    " ": "00000 00000 00000 00000 00000 00000 00000",
+}
+
+
+def render_chart(points, ticks, W=900, H=420):
+    """points = [(ts, value)] tang dan theo ts; ticks = [(ts, nhan)] cho truc ngang. -> bytes PNG"""
+    L, R, T, Bm = 104, 24, 22, 46            # le trai/phai/tren/duoi
+    buf = bytearray(b"\xff" * (W * H * 3))
+
+    def px(x, y, col):
+        if 0 <= x < W and 0 <= y < H:
+            i = (y * W + x) * 3
+            buf[i:i + 3] = col
+
+    def hline(x0, x1, y, col):
+        for x in range(x0, x1 + 1):
+            px(x, y, col)
+
+    def vline(x, y0, y1, col):
+        for y in range(y0, y1 + 1):
+            px(x, y, col)
+
+    def text(x, y, s, col, sc=2):
+        for ch in s:
+            g = _FONT.get(ch, _FONT[" "]).split()
+            for r, row in enumerate(g):
+                for c, bit in enumerate(row):
+                    if bit == "1":
+                        for dy in range(sc):
+                            for dx in range(sc):
+                                px(x + c * sc + dx, y + r * sc + dy, col)
+            x += 6 * sc
+
+    def tw(s, sc=2):
+        return len(s) * 6 * sc
+
+    GRID, AXIS, TXT, LINE, FILL = b"\xe6\xe9\xee", b"\x9a\xa3\xaf", b"\x4a\x52\x5e", b"\x2f\x7f\xe0", b"\xe6\xf0\xfc"
+    t0, t1 = ticks[0][0], ticks[-1][0]
+    vals = [v for _, v in points]
+    lo, hi = min(vals), max(vals)
+    pad = (hi - lo) * 0.15 or max(abs(hi) * 0.005, 0.05)
+    lo, hi = lo - pad, hi + pad
+    X = lambda t: L + int((t - t0) / (t1 - t0) * (W - L - R))
+    Y = lambda v: T + int((hi - v) / (hi - lo) * (H - T - Bm))
+    dec = 2 if hi - lo < 50 else (1 if hi - lo < 500 else 0)
+    for k in range(5):                       # luoi ngang + nhan truc doc
+        v = lo + (hi - lo) * k / 4
+        y = Y(v)
+        hline(L, W - R, y, GRID)
+        lab = f"{v:.{dec}f}"
+        text(L - 10 - tw(lab), y - 7, lab, TXT)
+    for ts, lab in ticks:                    # luoi doc + nhan truc ngang
+        x = X(ts)
+        vline(x, T, H - Bm, GRID)
+        text(min(max(x - tw(lab) // 2, 2), W - tw(lab) - 2), H - Bm + 12, lab, TXT)
+    hline(L, W - R, H - Bm, AXIS)
+    vline(L, T, H - Bm, AXIS)
+    pts = [(X(t), Y(v)) for t, v in points if t0 <= t <= t1]
+    base = H - Bm - 1
+    for (xa, ya), (xb, yb) in zip(pts, pts[1:]):         # to nhe phan duoi duong
+        for x in range(xa, max(xb, xa + 1)):
+            y = ya + (yb - ya) * (x - xa) // max(xb - xa, 1)
+            for yy in range(y + 2, base + 1):
+                i = (yy * W + x) * 3
+                if buf[i:i + 3] == b"\xff\xff\xff":
+                    buf[i:i + 3] = FILL
+    for (xa, ya), (xb, yb) in zip(pts, pts[1:]):         # duong line day 3px
+        n = max(abs(xb - xa), abs(yb - ya), 1)
+        for k in range(n + 1):
+            x, y = xa + (xb - xa) * k // n, ya + (yb - ya) * k // n
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    px(x + dx, y + dy, LINE)
+    if pts:                                  # cham tron o diem cuoi + gia tri hien tai
+        xe, ye = pts[-1]
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                if dx * dx + dy * dy <= 16:
+                    px(xe + dx, ye + dy, LINE)
+        lab = f"{points[-1][1]:.2f}"
+        text(min(max(xe - tw(lab) - 8, L + 4), W - R - tw(lab)), max(ye - 22, T + 2), lab, LINE)
+
+    raw = b"".join(b"\x00" + bytes(buf[y * W * 3:(y + 1) * W * 3]) for y in range(H))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def chart_for(kind):
+    """-> (png | None, ghi chu). 1 day / history: 24h, moc 4 gio. Week / month: moc theo ngay."""
+    now = datetime.now()
+    if kind in ("d", "h"):
+        end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        end += timedelta(hours=(-end.hour) % 4)                      # tron len moc 4 gio
+        start = end - timedelta(hours=24)
+        ticks = [(start + timedelta(hours=4 * i)) for i in range(7)]
+        ticks = [(t.timestamp(), t.strftime("%H:%M")) for t in ticks]
+    else:
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        if kind == "w":
+            start = end - timedelta(days=now.weekday() + 1)
+            step = 1
+        else:
+            start = end.replace(day=1) if end.day != 1 else (end - timedelta(days=1)).replace(day=1)
+            step = 5
+        days = max((end - start).days, 1)
+        ts = [start + timedelta(days=i) for i in range(0, days + 1, step)]
+        if ts[-1] != end:
+            ts.append(end)
+        ticks = [(t.timestamp(), t.strftime("%d/%m")) for t in ts]
+    pts = [(t, v) for t, v in bal_hist if ticks[0][0] <= t <= ticks[-1][0]]
+    if len(pts) > 450:                       # gop bot diem cho nhe
+        k = len(pts) // 400 + 1
+        pts = [(sum(t for t, _ in pts[i:i + k]) / len(pts[i:i + k]), sum(v for _, v in pts[i:i + k]) / len(pts[i:i + k]))
+               for i in range(0, len(pts), k)]
+    if len(pts) < 2:
+        since = datetime.fromtimestamp(bal_hist[0][0]).strftime("%d/%m %H:%M") if bal_hist else "bây giờ"
+        return None, f"Biểu đồ balance: chưa đủ dữ liệu (tool ghi 5 phút/lần, bắt đầu từ {since})."
+    since = datetime.fromtimestamp(bal_hist[0][0]).strftime("%d/%m %H:%M")
+    return render_chart(pts, ticks), f"Biểu đồ: total balance trung bình mỗi acc (USDT), ghi từ {since}."
+
+
 # --- /per: performance + lich su position (lay tu lich su dong lenh cua Bybit) ---
 PER_LABEL = {"d": "1 day", "w": "This week", "m": "This Month"}
 _per_cache = {}            # (ten acc, start_ms) -> (luc lay, records)
@@ -1486,9 +1673,9 @@ def history_view(data, limit=5):
 
 
 async def per_build(kind):
-    """kind: d / w / m / h -> (ban chu, blocks, ban phim)"""
+    """kind: d / w / m / h -> (ban chu, blocks, ban phim, png bieu do | None)"""
     if not clients:
-        return "Chưa cài sub account nào.", [r_par("Chưa cài sub account nào.")], per_kb(kind)
+        return "Chưa cài sub account nào.", [r_par("Chưa cài sub account nào.")], per_kb(kind), None
 
     async def one(c, start):
         try:
@@ -1502,15 +1689,84 @@ async def per_build(kind):
         if len(blocks[1].get("cells", [])) - 1 < 5:
             data = await asyncio.gather(*(one(c, now - 30 * 86400 * 1000) for c in clients))   # chua du 5 -> nhin xa hon
             text, blocks = history_view(data)
-        return text, blocks, per_kb("h")
-    start, desc = per_start(kind)
-    data = await asyncio.gather(*(one(c, start) for c in clients))
-    text, blocks = per_view(kind, data, desc)
-    return text, blocks, per_kb(kind)
+    else:
+        start, desc = per_start(kind)
+        data = await asyncio.gather(*(one(c, start) for c in clients))
+        text, blocks = per_view(kind, data, desc)
+    png, note = await asyncio.to_thread(chart_for, kind)
+    blocks.append(r_foot(note))
+    return text + "\n" + note, blocks, per_kb(kind), png
+
+
+per_msgs = {}              # message_id cua bang -> {"mode": "inline"} | {"mode": "sep", "photo": message_id anh}
+PHOTO_BLOCK = {"type": "photo", "photo": {"type": "photo", "media": "attach://chart"}}
+
+
+async def bot_form(method, fields, files, _timeout=25):
+    """Goi Bot API kem file (multipart)."""
+    if not cfg["bot_token"]:
+        return {}
+    form = aiohttp.FormData()
+    for k, v in fields.items():
+        form.add_field(k, v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+    for name, data in files.items():
+        form.add_field(name, data, filename=name + ".png", content_type="image/png")
+    try:
+        async with tg_http.post(f"https://api.telegram.org/bot{cfg['bot_token']}/{method}", data=form,
+                                timeout=aiohttp.ClientTimeout(total=_timeout, sock_connect=5)) as r:
+            return await r.json()
+    except Exception as e:
+        return {"ok": False, "description": f"{type(e).__name__}: {str(e)[:100]}".rstrip(": ")}
+
+
+def _net_err(desc):
+    return "Timeout" in desc or "Connect" in desc or "Disconnected" in desc
+
+
+async def per_send(chat, kind):
+    text, blocks, kb, png = await per_build(kind)
+    photo_mid = None
+    if png:
+        rich_on = cfg.get("widgets", True) and botst.get("rich") is not False
+        if rich_on and botst.get("rich_photo") is not False:     # cach 1: anh nam ngay trong rich message
+            r = await bot_form("sendRichMessage", {"chat_id": str(chat), "reply_markup": kb,
+                                                   "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}},
+                               {"chart": png})
+            if r.get("ok"):
+                botst["rich_photo"] = True
+                per_msgs[(r.get("result") or {}).get("message_id")] = {"mode": "inline"}
+                return
+            desc = str(r.get("description"))
+            if not _net_err(desc):
+                botst["rich_photo"] = False
+                log(f"Telegram không nhận ảnh trong rich message ({desc[:100]}) — gửi biểu đồ thành ảnh riêng phía trên bảng")
+        r = await bot_form("sendPhoto", {"chat_id": str(chat)}, {"photo": png})   # cach 2: anh rieng, ngay tren bang
+        if r.get("ok"):
+            photo_mid = (r.get("result") or {}).get("message_id")
+        else:
+            log(f"⚠️ Không gửi được biểu đồ: {str(r.get('description'))[:100]}")
+    mid, _ = await _send_rich(chat, text, blocks, kb)
+    if mid:
+        per_msgs[mid] = {"mode": "sep", "photo": photo_mid}
+    while len(per_msgs) > 30:
+        per_msgs.pop(next(iter(per_msgs)))
 
 
 async def per_edit(chat, mid, kind):
-    text, blocks, kb = await per_build(kind)
+    text, blocks, kb, png = await per_build(kind)
+    info = per_msgs.get(mid) or {}
+    if png and info.get("mode") == "inline":
+        r = await bot_form("editMessageText", {"chat_id": str(chat), "message_id": str(mid), "reply_markup": kb,
+                                               "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}},
+                           {"chart": png})
+        if r.get("ok") or "not modified" in str(r.get("description")):
+            return
+        log(f"/per: không sửa được tin có ảnh ({str(r.get('description'))[:100]}) — sửa bảng không kèm biểu đồ")
+    if png and info.get("photo"):
+        r = await bot_form("editMessageMedia", {"chat_id": str(chat), "message_id": str(info["photo"]),
+                                                "media": {"type": "photo", "media": "attach://chart"}}, {"chart": png})
+        if not r.get("ok") and "not modified" not in str(r.get("description")):
+            log(f"/per: không cập nhật được ảnh biểu đồ ({str(r.get('description'))[:100]})")
     r = {}
     if cfg.get("widgets", True) and botst.get("rich") is not False:
         r = await bot_api("editMessageText", _quiet=True, chat_id=chat, message_id=mid,
@@ -1660,8 +1916,7 @@ async def handle_update(u):
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], "/allin", allin=st)
                     return
             elif cmd == "/per":
-                text, blocks, kb = await per_build("d")
-                asyncio.create_task(_send_rich(chat, text, blocks, kb))
+                asyncio.create_task(per_send(chat, "d"))
                 return
             elif cmd == "/update":
                 log("⬆️ /update (từ Telegram)")
@@ -1901,6 +2156,14 @@ def selftest():
              "closeFee": "0.01", "updatedTime": str(int(time.time() * 1000))}]
     json.dumps([per_view("d", [("Acc1", fake), ("Acc2", RuntimeError("x"))], "x"), history_view([("Acc1", fake)]),
                 per_kb("w"), per_start("w"), per_start("m")])
+    t_now = time.time()
+    png = render_chart([(t_now - 3600 * (24 - i), 100 + i * 0.01) for i in range(24)],
+                       [(t_now - 3600 * 24 + 14400 * i, "08:00") for i in range(7)])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 500
+    bal_hist[:] = [(t_now - 600, 100.0), (t_now - 300, 100.2)]
+    for k in "dwmh":
+        assert chart_for(k)[1]
+    bal_hist.clear()
     cfg["realized"] = {"pnl": -0.5, "fee": 0.1, "n": 1}
     assert len(realized_lines()) == 3 and "Realized PnL" in status_text() and live_kb()
     cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}
@@ -1933,6 +2196,7 @@ async def main():
         timeout=aiohttp.ClientTimeout(total=10),
         connector=aiohttp.TCPConnector(limit=50, keepalive_timeout=60))
     tg_http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=20, keepalive_timeout=90))
+    load_balance_log()
     rebuild_clients()
     await sync_time()
     try:

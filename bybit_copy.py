@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.10.1", ["PnL và phí hiện 2 số sau dấu chấm (vd -1.07) ở /per, Position History, /status, /close — bảng gọn hơn trên điện thoại"]),
     ("1.10.0", ["Lệnh mới /buyall #coin tp sl — mở Long toàn bộ vốn mỗi acc với đòn bẩy max của coin (size lớn nhất có thể)",
                 "Lệnh mới /sellall #coin tp sl — giống /buyall nhưng mở Short",
                 "Bỏ lệnh /allin (thay bằng /buyall); /buyall và /sellall không cần đặt /lev trước"]),
@@ -821,8 +822,8 @@ def realized_lines(always=False):
     if not rz.get("n") or not (always or has_pos()):
         return []
     lab = "PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)"
-    return ["Realized PnL", f"{lab} = {dot(rz['pnl'])} {rz['pnl']:+.4f} USDT",
-            f"Total fee = {rz['fee']:.4f} USDT"]
+    return ["Realized PnL", f"{lab} = {dot(rz['pnl'])} {rz['pnl']:+.2f} USDT",
+            f"Total fee = {rz['fee']:.2f} USDT"]
 
 
 async def close_partial(pct):
@@ -839,8 +840,8 @@ async def close_partial(pct):
     done = [x for x in rows if x["ok"]]
     for x in rows:
         if x["ok"]:
-            fee = f"{x['fee']:.4f}" if x.get("fee") is not None else "—"
-            log(f"✂️ {x['acc']}: đóng {pct}% {x['symbol']} (~{x['usd']:.2f} USDT) | phí {fee} | {x['pnl']:+.4f} USDT")
+            fee = f"{x['fee']:.2f}" if x.get("fee") is not None else "—"
+            log(f"✂️ {x['acc']}: đóng {pct}% {x['symbol']} (~{x['usd']:.2f} USDT) | phí {fee} | {x['pnl']:+.2f} USDT")
         else:
             log(f"❌ {x['acc']}: đóng {pct}% {x['symbol']} lỗi: {x['err']}")
     errs = [x for x in rows if not x["ok"]]
@@ -877,21 +878,21 @@ async def close_all():
             log(T[-1])
             continue
         px = f"{num(x['entry'])} → {num(x['exit'])}" if x["exit"] else f"entry {num(x['entry'])}"
-        fee = f"{x['fee']:.4f}" if x["fee"] is not None else "—"
+        fee = f"{x['fee']:.2f}" if x["fee"] is not None else "—"
         tag = " (ước tính)" if x["est"] else ""
         T.append(f"{x['acc']} · {side_vn(x['side'])} {x['symbol']} x{x['lev']}\n"
                  f"   Size {x['usd']:.2f} USDT | {px}\n"
-                 f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+                 f"   Phí {fee} USDT | {dot(x['pnl'])} {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
         R.append([B(x["acc"]), [B(f"{side_vn(x['side'])} {x['symbol']}"), f" x{x['lev']}\nSize {x['usd']:.2f} USDT\n{px}"],
-                  fee, f"{dot(x['pnl'])} {x['pct']:+.2f}%", B(f"{x['pnl']:+.4f}{'*' if x['est'] else ''}")])
-        log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.4f} USDT{tag}")
+                  fee, f"{dot(x['pnl'])} {x['pct']:+.2f}%", B(f"{x['pnl']:+.2f}{'*' if x['est'] else ''}")])
+        log(f"✅ {x['acc']}: đóng {x['symbol']} | phí {fee} | {x['pct']:+.2f}% | {x['pnl']:+.2f} USDT{tag}")
     blocks = [r_head(f"🛑 Đã đóng {len(done)}/{len(rows)} position")]
     if done:
-        ft = f"{sum(fees):.4f}" if fees else "—"
+        ft = f"{sum(fees):.2f}" if fees else "—"
         note = ("* PnL ước tính theo giá lúc đóng, chưa trừ phí (Bybit chưa trả số liệu)" if est
                 else "PnL đã trừ phí mở + đóng. Đơn vị: USDT.")
-        T.append(f"Tổng phí {ft} USDT | Tổng PnL {dot(tot)} {tot:+.4f} USDT\n({note})")
-        R.append([B("Tổng"), "", B(ft), dot(tot), B(f"{tot:+.4f}")])
+        T.append(f"Tổng phí {ft} USDT | Tổng PnL {dot(tot)} {tot:+.2f} USDT\n({note})")
+        R.append([B("Tổng"), "", B(ft), dot(tot), B(f"{tot:+.2f}")])
         blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
         blocks.append(r_foot(note))
     for e in errs:
@@ -901,8 +902,8 @@ async def close_all():
         rz = cfg["realized"]
         T.append(f"Cả đợt (gồm các lần đóng một phần): {rl[1]} | {rl[2]}")
         blocks.append(r_table(["Cả đợt (gồm các lần đóng một phần)", "USDT"],
-                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])} {rz['pnl']:+.4f}")],
-                               ["Total fee", B(f"{rz['fee']:.4f}")]], [None, "right"]))
+                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])} {rz['pnl']:+.2f}")],
+                               ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
     return "\n".join(T), blocks
 
 
@@ -924,10 +925,10 @@ def status_text():
             for p in st["positions"]:
                 tot += p["pnl"]
                 lines.append(f"{c.name}: {side_vn(p['side'])} {p['symbol']} x{p['lev']}\n"
-                             f"   Size {float(p['size']) * p['avg']:.2f} USDT | entry {num(p['avg'])} | phí {p.get('fee', 0):.4f}\n"
-                             f"   {dot(p['pnl'])} {p['pct']:+.2f}% | {p['pnl']:+.4f} USDT")
+                             f"   Size {float(p['size']) * p['avg']:.2f} USDT | entry {num(p['avg'])} | phí {p.get('fee', 0):.2f}\n"
+                             f"   {dot(p['pnl'])} {p['pct']:+.2f}% | {p['pnl']:+.2f} USDT")
     if any((status.get(c.name) or {}).get("positions") for c in clients):
-        lines.append(f"Tổng PnL đang mở: {dot(tot)} {tot:+.4f} USDT")
+        lines.append(f"Tổng PnL đang mở: {dot(tot)} {tot:+.2f} USDT")
     return "\n".join(lines)
 
 
@@ -941,8 +942,8 @@ def status_blocks(title=None, stamp=None):
         rz = cfg["realized"]
         blocks.append(r_table(["Realized PnL", "USDT"],
                               [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
-                                B(f"{dot(rz['pnl'])} {rz['pnl']:+.4f}")],
-                               ["Total fee", B(f"{rz['fee']:.4f}")]], [None, "right"]))
+                                B(f"{dot(rz['pnl'])} {rz['pnl']:+.2f}")],
+                               ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
     R, tot, has = [], 0.0, False
     for c in clients:
         st = status.get(c.name) or {}
@@ -957,9 +958,9 @@ def status_blocks(title=None, stamp=None):
                 tot += p["pnl"]
                 R.append([B(c.name), [B(f"{side_vn(p['side'])} {p['symbol']}"),
                                       f" x{p['lev']}\nSize {float(p['size']) * p['avg']:.2f} USDT\nEntry {num(p['avg'])}"],
-                          f"{p.get('fee', 0):.4f}", f"{dot(p['pnl'])} {p['pct']:+.2f}%", B(f"{p['pnl']:+.4f}")])
+                          f"{p.get('fee', 0):.2f}", f"{dot(p['pnl'])} {p['pct']:+.2f}%", B(f"{p['pnl']:+.2f}")])
     if has:
-        R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.4f}")])
+        R.append([B("Tổng"), "", "", dot(tot), B(f"{tot:+.2f}")])
     if R:
         blocks.append(r_table(POS_HEAD, R, POS_ALIGN))
     else:
@@ -1625,11 +1626,11 @@ def per_view(kind, data, desc):
         pnl, fee = sum(x["pnl"] for x in rs), sum(x["fee"] for x in rs)
         tn, tw, tp, tf = tn + n, tw + w, tp + pnl, tf + fee
         wr = f"{w / n * 100:.0f}%" if n else "—"
-        T.append(f"{name}: {n} lệnh | win {wr} | {dot(pnl)} {pnl:+.4f} USDT | fee {fee:.4f}")
-        R.append([B(name), str(n), wr, B(f"{dot(pnl)} {pnl:+.4f}"), f"{fee:.4f}"])
+        T.append(f"{name}: {n} lệnh | win {wr} | {dot(pnl)} {pnl:+.2f} USDT | fee {fee:.2f}")
+        R.append([B(name), str(n), wr, B(f"{dot(pnl)} {pnl:+.2f}"), f"{fee:.2f}"])
     wr = f"{tw / tn * 100:.0f}%" if tn else "—"
-    T.append(f"Tổng: {tn} lệnh | win {wr} | {dot(tp)} {tp:+.4f} USDT | fee {tf:.4f}")
-    R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)} {tp:+.4f}"), B(f"{tf:.4f}")])
+    T.append(f"Tổng: {tn} lệnh | win {wr} | {dot(tp)} {tp:+.2f} USDT | fee {tf:.2f}")
+    R.append([B("Tổng"), B(str(tn)), B(wr), B(f"{dot(tp)} {tp:+.2f}"), B(f"{tf:.2f}")])
     stamp = f"PnL đã gồm phí · USDT · {desc} · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     T.append(stamp)
     blocks = [r_head(title),
@@ -1662,8 +1663,8 @@ def history_view(data, limit=5):
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
         name = f"{'Buy' if g['side'] == 'Buy' else 'Sell'} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
         who = f"{len(g['accs'])} acc" if len(g["accs"]) >= len(clients) else ", ".join(sorted(g["accs"]))
-        T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.4f} USDT | fee {g['fee']:.4f}")
-        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])} {g['pnl']:+.4f}"), f"{g['fee']:.4f}"])
+        T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.2f} USDT | fee {g['fee']:.2f}")
+        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])} {g['pnl']:+.2f}"), f"{g['fee']:.2f}"])
     stamp = f"Gộp tất cả acc · PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     blocks = [r_head(title)]
     if R:

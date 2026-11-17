@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.5.2", ["Khi lệnh lỗi, bot thêm dòng 💡 gợi ý cách sửa: size tối thiểu, size tối đa theo số dư, lỗi API key…"]),
     ("1.5.1", ["Chỉ cập nhật khi bạn gõ /update (hoặc bấm nút trên tool) — bỏ tự động cập nhật",
                "/update trả về change log dạng rich message"]),
     ("1.5.0", ["Lệnh /update qua bot Telegram",
@@ -331,6 +332,7 @@ def _store_instrument(it):
             "maxmkt": D(it["lotSizeFilter"].get("maxMktOrderQty") or it["lotSizeFilter"]["maxOrderQty"]),
             "tick": D(it["priceFilter"]["tickSize"]),
             "maxlev": float(it["leverageFilter"]["maxLeverage"]),
+            "minval": float(it["lotSizeFilter"].get("minNotionalValue") or 0),
         }
     except Exception:
         pass
@@ -549,16 +551,19 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
     t0 = t0 or time.time()
     cmd = {"coin": coin.upper()}
     if not clients:
-        log("Có lệnh nhưng chưa cài sub account nào")
-        return "Chưa có sub account"
+        msg = "❌ Chưa cài sub account nào\n💡 Mở tool trên máy, dán apikey=apisecret của từng sub vào ô Sub account rồi bấm Lưu."
+        log(msg); asyncio.create_task(notify(msg))
+        return msg
     symbol = await resolve_symbol(cmd["coin"])
     if not symbol:
-        msg = f"❌ Không tìm thấy hợp đồng {cmd['coin']}USDT trên Bybit"
+        msg = (f"❌ Không tìm thấy hợp đồng {cmd['coin']}USDT trên Bybit\n"
+               f"💡 Kiểm tra lại tên coin: phải là hợp đồng USDT Perpetual đang giao dịch trên Bybit. "
+               f"Coin giá rất nhỏ thường có tiền tố, vd #1000pepe.")
         log(msg); asyncio.create_task(notify(msg))
         return msg
     price, perr = await get_price(symbol)
     if price is None:
-        msg = f"❌ Không lấy được giá {symbol}: {perr}"
+        msg = f"❌ Không lấy được giá {symbol}: {perr}\n💡 Thường do mạng tới Bybit chập chờn: gửi lại lệnh sau vài giây."
         log(msg); asyncio.create_task(notify(msg))
         return msg
     res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin) for c in clients))
@@ -571,11 +576,68 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None):
             head += f"\n⚠️ SL -{sl:g}% xa hơn mức thanh lý ước tính (~-{100 / lv:.1f}%) — có thể bị thanh lý trước khi chạm SL"
     else:
         head = f"📥 [{source}] Long {symbol} | size {notional:.0f} USDT | TP +{tp:g}% | SL -{sl:g}% | {ms}ms"
+    res = list(res) + order_hints(res, cmd["coin"], symbol, price, tp, sl, source, allin)
     log(head)
     for line in res:
         log(line)
     asyncio.create_task(notify(head + "\n" + "\n".join(res)))
     return head + "\n" + "\n".join(res)
+
+
+def min_usdt(symbol, price):
+    """Size USDT nho nhat de dat duoc lenh (da cong 2% du phong gia chay)."""
+    ins = instruments[symbol]
+    v = max(float(ins["min"]) * price, ins.get("minval", 0)) * 1.02
+    return math.ceil(v) if v >= 10 else math.ceil(v * 10) / 10
+
+
+def order_hints(res, coin, symbol, price, tp, sl, source, allin):
+    """Them dong 💡 huong dan cach sua cho cac loi thuong gap."""
+    bad = " ".join(x for x in res if x.startswith("❌")).lower()
+    if not bad:
+        return []
+    ins, H = instruments[symbol], []
+    base = symbol[:-4]
+    if "size quá nhỏ" in bad:
+        mu = min_usdt(symbol, price)
+        H.append(f"💡 Size tối thiểu của {symbol} là {fmt(ins['min'])} {base} ≈ {mu:g} USDT (giá {num(price)}).")
+        if allin:
+            lv = ins["maxlev"] if allin[0] == "max" else min(allin[1], ins["maxlev"])
+            H.append(f"   All-in ở x{lv:g} cần ít nhất ~{mu / lv * 1.1:.2f} USDT khả dụng mỗi acc. Nạp thêm hoặc tăng /lev.")
+        elif source == "/buy":
+            H.append(f"   Gõ lại: /buy #{coin.lower()} {mu:g} {tp:g} {sl:g}")
+        else:
+            unit = float(cfg["size_unit"]) or 1
+            H.append(f"   Lệnh kênh cần size ≥ {mu / unit:g} (1 = {unit:g} USDT), hoặc đổi sang chế độ Custom với size ≥ {mu:g} USDT.")
+    if "insufficient" in bad or "not enough" in bad:
+        caps = []
+        for c in clients:
+            b = (status.get(c.name) or {}).get("balance")
+            if b is not None:
+                caps.append((b * SAFETY * ins["maxlev"], c.name, b))
+        if caps:
+            cap, name, b = min(caps)
+            H.append(f"💡 Không đủ ký quỹ. Size tối đa mở được ở mọi acc: ~{cap:.0f} USDT "
+                     f"({name} còn {b:.2f} USDT khả dụng, {symbol} max x{ins['maxlev']:g}).")
+        else:
+            H.append("💡 Không đủ ký quỹ: giảm size hoặc nạp thêm USDT vào Unified Trading Account của sub.")
+    if "số dư = 0" in bad:
+        H.append("💡 Acc chưa có USDT khả dụng: chuyển USDT vào Unified Trading Account của sub đó.")
+    if "api key" in bad or "apikey" in bad or "sign" in bad:
+        H.append("💡 API key/secret sai hoặc đã hết hạn: tạo lại API key của sub và dán lại vào tool (dạng apikey=apisecret).")
+    if "permission" in bad:
+        H.append("💡 API key thiếu quyền: bật Contract → Orders + Positions (Read-Write) cho API key của sub.")
+    if "unmatched ip" in bad or " ip " in bad:
+        H.append("💡 IP máy bạn không nằm trong danh sách IP của API key: thêm IP hiện tại hoặc bỏ giới hạn IP.")
+    if "risk limit" in bad:
+        H.append("💡 Vượt giới hạn rủi ro của Bybit ở mức đòn bẩy này: giảm size hoặc hạ /lev.")
+    if "lệch giờ" in bad:
+        H.append("💡 Tool đã tự đồng bộ lại giờ với Bybit: gửi lại lệnh sau vài giây.")
+    if "max" in bad and "qty" in bad:
+        H.append(f"💡 Vượt khối lượng tối đa cho 1 lệnh market của {symbol} ({fmt(ins['maxmkt'])} {base} ≈ {float(ins['maxmkt']) * price:,.0f} USDT): giảm size.")
+    if not H:
+        H.append("💡 Lỗi do Bybit trả về (dòng ❌ ở trên). Kiểm tra position mode là One-Way và acc là Unified Trading Account; nếu vẫn lỗi, chụp lại tin này để nhờ sửa.")
+    return H
 
 
 # ---------------------------------------------------------------------------

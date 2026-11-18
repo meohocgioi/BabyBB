@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.32.1"
+VERSION = "1.32.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.32.2", ["/status: dòng Template chưa áp dụng ghi gọn là None; dòng Trailing bỏ chữ (sàn); SL / TP đặt đúng entry hiện (= entry) thay cho (-0.00%)"]),
     ("1.32.1", ["Tin hướng dẫn Custom TP-SL, Trailing Stop, Close Custom Size và cảnh báo khớp lệnh dùng chung 1 kiểu: tiêu đề, bảng thông tin, bảng Cách gõ (chữ mẫu dạng code), ghi chú nhỏ ở cuối"]),
     ("1.32.0", ["Enter custom TP-SL: dấu của SL theo hướng giá so với entry — 50 +5 = SL lời (trên entry 5%), 50 -5 hoặc 50 5 = SL lỗ (dưới entry 5%), 50 0 = SL hoà vốn"]),
     ("1.31.1", ["Mở Custom Trailing / Custom TP-SL / Close Custom Size rồi không gõ mà bấm sang nút khác dưới /status → tin hướng dẫn tự bị xoá, ô nhập huỷ luôn"]),
@@ -1117,7 +1118,7 @@ def plan_note(sym):
     pl = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym and x.get("type") != "trail"]
     applied = (cfg.get("tpl_applied") or {}).get(sym)
     if not pl:
-        return f"📋 Template: {TEMPLATES[applied][0]} (đã đặt TP / SL)" if applied in TEMPLATES else "📋 Template: chưa áp dụng"
+        return f"📋 Template: {TEMPLATES[applied][0]} (đã đặt TP / SL)" if applied in TEMPLATES else "📋 Template: None"
     ptp = [x for x in pl if x["type"] == "ptp"]
     if ptp:
         st = min(x["step"] for x in ptp)
@@ -1279,7 +1280,7 @@ def trail_note(sym):
         px = cur_price({"symbol": sym, "entry": nat[0][1]["avg"]})
         dist = float(nat[0][1]["ts"])
         act = float(nat[0][1].get("act") or 0)
-        out.append(f"🧵 Trailing (sàn) {len(nat)} acc · hồi ~{dist / px * 100:.2f}% (cách {num(dist)})"
+        out.append(f"🧵 Trailing {len(nat)} acc · hồi ~{dist / px * 100:.2f}% (cách {num(dist)})"
                    + (f" · kích hoạt {num(act)}" if act else ""))
     bot = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym and x.get("type") == "trail"]
     if bot:
@@ -2095,7 +2096,7 @@ def hb_parts(g, tg, sd, style="hb2"):
         frac = clamp(moved / span) if span > 0 else 0.0
         n = int(round(frac * 10))
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
-        parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
+        parts += [f"{icon} {lab} {num(lv)} ({mv + 0:+.2f}%) " if round(mv, 2) else f"{icon} {lab} {num(lv)} (= entry) ", chip(f"{exp:+.2f}", exp >= 0),
                   "\n"] + (lambda b: b if isinstance(b, list) else [b])(hb_bar(frac, key == "tp", style))
     return parts
 

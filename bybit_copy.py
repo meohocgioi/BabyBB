@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.25.0"
+VERSION = "1.25.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.25.1", ["/status có 3 nút trên 1 dòng: 1m Candle · Health Bar (ảnh) · Health Bar v2 (chữ, mặc định)"]),
     ("1.25.0", ["Health Bar mới bằng chữ (không còn ảnh): thanh 🏁 Tới TP / 💀 Tới SL kiểu game, % quãng đường đã đi",
                 "Lãi/lỗ dự kiến khi chạm TP / SL (tổng các acc, đã trừ phí) — số lãi viên xanh, số lỗ viên đỏ; uPnL hiện tại cũng có màu",
                 "Nhẹ hơn nhiều cho Telegram: Health Bar không phải tải ảnh lên mỗi lần cập nhật"]),
@@ -1307,7 +1308,7 @@ def status_blocks(title=None, stamp=None, photos=None):
     for key in order:
         sym, sd = key
         g = G[key]
-        if live_view() == "hb":                            # Health Bar bang chu, khong con anh
+        if live_view() == "hb2":                           # Health Bar v2 bang chu, khong can anh
             blocks.append(r_par(hb_parts(g, tgs.get(sym), sd)))
         elif photos and photos.get(sym):
             blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
@@ -1966,12 +1967,12 @@ async def handle_callback(cq):
         live["detail"] = det
         asyncio.create_task(answer())
         return await edit_now()
-    if data in ("v:hb", "v:c1"):              # chon Health Bar / nen 1m
+    if data in ("v:hb", "v:c1", "v:hb2"):     # chon 1m Candle / Health Bar / Health Bar v2
         want = data[2:]
         if live_view() == want:
             return await answer()
         live["view"] = want
-        asyncio.create_task(answer("Health Bar" if want == "hb" else "1m Candle"))
+        asyncio.create_task(answer({"hb": "Health Bar", "hb2": "Health Bar v2", "c1": "1m Candle"}[want]))
         tgs = [t for t in chart_targets() if t.get("entry")]
         if tgs:
             try:
@@ -2054,10 +2055,10 @@ def live_sig():
 
 
 def view_buttons():
-    """2 nut chon kieu hien thi, kieu dang chon co dau ✅ (giong cac nut 15m / 1h / 4h)."""
+    """3 nut chon kieu hien thi tren 1 dong, kieu dang chon co dau ✅."""
     v = live_view()
-    return [{"text": ("✅ " if v == "c1" else "⬜ ") + "1m Candle", "callback_data": "v:c1"},
-            {"text": ("✅ " if v == "hb" else "⬜ ") + "Health Bar", "callback_data": "v:hb"}]
+    return [{"text": ("✅ " if v == k else "⬜ ") + t, "callback_data": f"v:{k}"}
+            for k, t in (("c1", "1m Candle"), ("hb", "Health Bar"), ("hb2", "Health Bar v2"))]
 
 
 def live_stamp():
@@ -2111,7 +2112,7 @@ async def start_live(chat, user_mid=None):
     live_stop()
     live["confirm"] = None
     live["menu"] = None
-    live["view"] = "hb"                        # moi tin /status mac dinh la Health Bar
+    live["view"] = "hb2"                       # moi tin /status mac dinh la Health Bar v2 (chu)
     live["detail"] = set()                     # mac dinh: gon, an bang tung acc
     live["sel"] = None
     live.update(pngs=None, png_sym=None)
@@ -2683,7 +2684,7 @@ async def fetch_candles(symbol):
 
 
 def live_view():
-    return live.get("view") or "hb"          # mac dinh: Health Bar
+    return live.get("view") or "hb2"         # mac dinh: Health Bar v2 (chu)
 
 
 def cur_price(tg):
@@ -2699,9 +2700,11 @@ def set_pngs(pngs, key):
 
 
 async def render_one(tg):
-    """1 anh chart nen 1m cho 1 coin (Health Bar nay la chu, khong can anh)."""
-    if live_view() == "hb":
+    """1 anh cho 1 coin: Health Bar (anh) hoac chart nen 1m. Health Bar v2 la chu -> khong can anh."""
+    if live_view() == "hb2":
         return None
+    if live_view() == "hb":
+        return await asyncio.to_thread(render_health, tg, cur_price(tg))
     candles = await fetch_candles(tg["symbol"])
     if len(candles) < 2:
         return (live.get("pngs") or {}).get(tg["symbol"])
@@ -2734,7 +2737,7 @@ async def chart_loop():
         await asyncio.sleep(1)
         try:
             on = live["mid"] and live["rich"] and cfg["bot_token"]
-            tgs = [t for t in (chart_targets() if on else []) if t.get("entry")] if live_view() == "c1" else []
+            tgs = [t for t in (chart_targets() if on else []) if t.get("entry")] if live_view() in ("c1", "hb") else []
             if not tgs:
                 if live.get("pngs"):
                     live.update(pngs=None, png_sym=None, png_v=live.get("png_v", 0) + 1)

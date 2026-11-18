@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.23.1"
+VERSION = "1.24.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.24.0", ["/per → Position History: tên mỗi lệnh (vd ▸ Long ZKP) là nút bấm — mở ra Entry, giá đóng trung bình, ROI% và PnL của từng acc"]),
     ("1.23.1", ["Bỏ /setting, Rebalance và /mainkey — không dùng API key tài khoản chính vì lý do an toàn. Nếu bản 1.23.0 đã lưu key chính thì key đó được xoá khỏi máy"]),
     ("1.22.0", ["/status nhiều coin: mỗi coin có Health Bar / chart 1m riêng, nằm ngay trên bảng của coin đó",
                 "Close Order và Edit TP & SL: khi có nhiều coin, chọn position trước (mỗi coin 1 dòng) rồi mới chọn % / TP / SL",
@@ -1033,9 +1034,9 @@ def r_par(text):
     return {"type": "paragraph", "text": text}
 
 
-def r_table(header, rows, aligns=None):
+def r_table(header, rows, aligns=None, show_header=True):
     aligns = aligns or [None] * len(header)
-    cells = [[cell(B(h), True, a) for h, a in zip(header, aligns)]]
+    cells = [[cell(B(h), True, a) for h, a in zip(header, aligns)]] if show_header else []
     cells += [[cell(v, False, a) for v, a in zip(r, aligns)] for r in rows]
     return {"type": "table", "cells": cells, "is_bordered": True, "is_striped": True, "is_compact": True}
 
@@ -1827,6 +1828,13 @@ async def handle_callback(cq):
     mid = (cq.get("message") or {}).get("message_id")
     if data == "noop":
         return await answer()
+    if data.startswith("hx:"):                 # Position History: mo / dong chi tiet 1 lenh
+        info = per_msgs.setdefault(mid, {"mode": "sep", "photo": None})
+        op = set(info.get("open") or set())
+        op.symmetric_difference_update({data[3:]})
+        info["open"] = op
+        asyncio.create_task(answer())
+        return await per_edit((cq.get("message") or {}).get("chat", {}).get("id") or cfg["bot_owner_id"], mid, "h")
     if data == "ph" or data.startswith("pf:"):
         kind = "h" if data == "ph" else data[3:]
         if kind not in ("d", "w", "m", "h"):
@@ -2728,9 +2736,13 @@ def reason_of(create_type, link):
     return ct.replace("CreateBy", "") or "?"
 
 
+_reason_cache = {}
+
+
 async def order_reasons(c, ids, start_ms):
     """{orderId: ly do} — TP / SL / thanh ly / dong tay / tool — tu lich su lenh (toi da 7 ngay)."""
-    want, out = {i for i in ids if i}, {}
+    out = {i: _reason_cache[i] for i in ids if i in _reason_cache}
+    want = {i for i in ids if i and i not in out}
     if not want:
         return out
     now = int(time.time() * 1000) + time_offset
@@ -2750,11 +2762,16 @@ async def order_reasons(c, ids, start_ms):
         r = await c.req("GET", "/v5/order/history", {"category": "linear", "orderId": oid})
         for o in (r.get("result") or {}).get("list") or []:
             out[oid] = reason_of(o.get("createType"), o.get("orderLinkId"))
+    _reason_cache.update(out)
+    if len(_reason_cache) > 3000:
+        _reason_cache.clear()
     return out
 
 
 def _rec(it):
-    return {"symbol": it["symbol"], "oid": it.get("orderId"), "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
+    return {"symbol": it["symbol"], "oid": it.get("orderId"),
+            "q": float(it.get("closedSize") or it.get("qty") or 0), "ev": float(it.get("cumEntryValue") or 0),
+            "xv": float(it.get("cumExitValue") or 0), "lev": float(it.get("leverage") or 0) or 1.0, "side": "Buy" if it.get("side") == "Sell" else "Sell",   # lenh dong Sell = position Long
             "size": float(it.get("cumEntryValue") or 0),     # gia tri USDT cua phan da dong, tinh theo gia entry
             "pnl": float(it.get("closedPnl") or 0),
             "fee": float(it.get("openFee") or 0) + float(it.get("closeFee") or 0),
@@ -2795,7 +2812,8 @@ def per_view(kind, data, desc):
     return "\n".join(T), blocks
 
 
-def history_view(data, limit=5, reasons=None):
+def history_view(data, limit=5, reasons=None, opened=None):
+    """opened = cac lan dong dang mo chi tiet (bam ten lenh)."""
     """Gop cac lan dong cung coin, cung chieu, cung luc (trong 60s) cua moi acc thanh 1 dong."""
     recs, errs = [], []
     for name, rs in data:
@@ -2810,24 +2828,51 @@ def history_view(data, limit=5, reasons=None):
                   and abs(g["t"] - x["t"]) <= 60000), None)
         if g is None:
             g = {"symbol": x["symbol"], "side": x["side"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0, "accs": set(),
-                 "why": set()}
+                 "why": set(), "per": {}}
             groups.append(g)
         g["size"] += x["size"]; g["pnl"] += x["pnl"]; g["fee"] += x["fee"]; g["accs"].add(x["acc"])
+        a = g["per"].setdefault(x["acc"], {"q": 0.0, "ev": 0.0, "xv": 0.0, "pnl": 0.0, "lev": x["lev"]})
+        a["q"] += x["q"]; a["ev"] += x["ev"]; a["xv"] += x["xv"]; a["pnl"] += x["pnl"]
         if reasons and reasons.get(x.get("oid")):
             g["why"].add(reasons[x["oid"]])
     groups = groups[:limit]
     title = "🧾 Position History"
     T, R = [title], []
+    opened = opened or set()
+    HEAD, AL = ["Position", "Size", "PnL"], [None, "right", "right"]
+    blocks, seg = [r_head(title)], []
+
+    def flush(first):
+        if seg:
+            blocks.append(r_table(HEAD, list(seg), AL, show_header=first))
+            seg.clear()
+    first = True
     for g in groups:
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
         name = f"{side_vn(g['side'])} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
         who = f"{len(g['accs'])} acc" + (" · " + " / ".join(sorted(g["why"])) if g["why"] else "")
+        key = f"{g['symbol']}:{int(g['t'] // 1000)}"
+        is_open = key in opened
         T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.2f} USDT | fee {g['fee']:.2f}")
-        R.append([[B(name), f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
-    stamp = f"PnL đã gồm phí · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
-    blocks = [r_head(title)]
+        btn = {"type": "button", "button": {"text": ("▾ " if is_open else "▸ ") + name, "callback_data": f"hx:{key}"}}
+        R.append(1)
+        seg.append([[btn, f"\n{when} · {who}"], f"{g['size']:.2f}", B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")])
+        if is_open:                              # bang chi tiet tung acc ngay duoi dong nay
+            flush(first); first = False
+            D_ = []
+            for acc in sorted(g["per"]):
+                a = g["per"][acc]
+                entry = a["ev"] / a["q"] if a["q"] else 0
+                close = a["xv"] / a["q"] if a["q"] else 0
+                margin = a["ev"] / a["lev"] if a["lev"] else a["ev"]
+                roi = a["pnl"] / margin * 100 if margin else 0
+                D_.append([[B(acc), f" x{a['lev']:g}"], f"Entry {num(entry)}\nClose {num(close)}",
+                           [B(f"{dot(a['pnl'])}\u00a0{roi:+.2f}%"), f"\n{a['pnl']:+.2f}"]])
+            blocks.append(r_table(["Acc", f"{name} · giá", "ROI · PnL"], D_, [None, None, "right"]))
+    flush(first)
+    stamp = f"PnL đã gồm phí · ROI = PnL / ký quỹ · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     if R:
-        blocks.append(r_table(["Position", "Size", "PnL"], R, [None, "right", "right"]))
+        pass
     else:
         T.append("Chưa có position nào được đóng trong 30 ngày qua.")
         blocks.append(r_par("Chưa có position nào được đóng trong 30 ngày qua."))
@@ -2839,7 +2884,7 @@ def history_view(data, limit=5, reasons=None):
     return "\n".join(T), blocks
 
 
-async def per_build(kind):
+async def per_build(kind, opened=None):
     """kind: d / w / m / h -> (ban chu, blocks, ban phim, png bieu do | None)"""
     if not clients:
         return "Chưa cài sub account nào.", [r_par("Chưa cài sub account nào.")], per_kb(kind), None
@@ -2864,7 +2909,7 @@ async def per_build(kind):
             except Exception:
                 return {}
         rs = await asyncio.gather(*(why(c, recs) for c, (_, recs) in zip(clients, data)))
-        text, blocks = history_view(data, reasons={k: v for d in rs for k, v in d.items()})
+        text, blocks = history_view(data, reasons={k: v for d in rs for k, v in d.items()}, opened=opened)
     else:
         start, desc = per_start(kind)
         data = await asyncio.gather(*(one(c, start) for c in clients))
@@ -2942,7 +2987,10 @@ async def per_send(chat, kind, user_mid=None):
 
 
 async def per_edit(chat, mid, kind):
-    text, blocks, kb, png = await per_build(kind)
+    info0 = per_msgs.get(mid) or {}
+    if kind != "h":
+        info0.pop("open", None)
+    text, blocks, kb, png = await per_build(kind, opened=info0.get("open"))
     info = per_msgs.get(mid) or {}
     if png and info.get("mode") == "inline":
         r = await bot_form("editMessageText", {"chat_id": str(chat), "message_id": str(mid), "reply_markup": kb,

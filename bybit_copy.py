@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.29.2"
+VERSION = "1.30.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.30.0", ["Edit TP & SL → ✏️ Enter custom TP-SL: gõ \"TP SL\" (vd 10 5 = TP +10%, SL −5% từ entry từng acc), đặt luôn không hỏi",
+                "Nếu TP / SL đó làm lệnh khớp ngay: bot cảnh báo, gợi ý mức TP / SL an toàn, hỏi Tiếp tục / Cancel"]),
     ("1.29.2", ["Khi Telegram đang giới hạn bot, bấm nút sẽ hiện thông báo rõ (giới hạn tới mấy giờ) thay vì im lặng",
                 "Bấm nút lúc bị giới hạn không còn làm tool gửi dồn lên Telegram (tránh bị khoá lâu hơn)"]),
     ("1.29.1", ["Order Template: bảng giải thích ở trên, các nút TP v1 / TP v2 / Part-TP v1 nằm ngay dưới bảng (kèm nút Đóng)"]),
@@ -1200,6 +1202,108 @@ async def plan_loop():
             log(f"Order Template: {type(e).__name__}: {str(e)[:120]}")
 
 
+# ===== Enter custom TP-SL: go "TP SL" (% tu entry tung acc) =====
+CTP_TTL = 300
+
+
+def ctp_parse(txt):
+    """'10 5' / '10% 5%' / '10/5' -> (10.0, 5.0) hoac None."""
+    t = (txt or "").replace("%", " ").replace("/", " ").replace(";", " ").strip()
+    parts = t.replace(",", ".").split()
+    if len(parts) != 2:
+        return None
+    try:
+        tp, sl = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    return (tp, sl) if tp > 0 else None
+
+
+async def ctp_ask(chat, sym, warn=None):
+    pos = acc_positions(sym)
+    if not pos:
+        return send(chat, "Không có position nào đang mở.")
+    e = sum(float(p["size"]) * p["avg"] for _, p in pos) / sum(float(p["size"]) for _, p in pos)
+    sd = pos[0][1]["side"]
+    px = cur_price({"symbol": sym, "entry": e})
+    gain = (px / e - 1) * 100 * (1 if sd == "Buy" else -1)
+    text = ((("⚠️ " + warn + "\n") if warn else "") +
+            f"✏️ Custom TP-SL — {side_vn(sd)} {coin_of(sym)} · entry {num(e)} · giá {num(px)} ({gain:+.2f}%)\n"
+            "Gõ: TP SL (tính % từ entry của từng acc)\nVd: 10 5 → TP +10%, SL −5%")
+    rm, _ = await _send(chat, text, {"force_reply": True, "input_field_placeholder": "TP SL  (vd: 10 5)"})
+    live["ctp"] = {"t": time.time(), "sym": sym}
+    track_new("ctp", chat, rm)
+
+
+def ctp_hits(sym, tp, sl):
+    """Acc nao se KHOP NGAY voi TP/SL nay + goi y muc an toan. -> (dong canh bao, goi y)"""
+    out, gains = [], []
+    for c, p in acc_positions(sym):
+        e, sd = p["avg"], p["side"]
+        px = cur_price({"symbol": sym, "entry": e})
+        g = (px / e - 1) * 100 * (1 if sd == "Buy" else -1)
+        gains.append(g)
+        if g >= tp:
+            out.append(f"🏁 {c.name}: giá đang {g:+.2f}% ≥ TP +{tp:g}% → chốt lời NGAY toàn bộ acc này")
+        elif g <= -sl:
+            out.append(f"💀 {c.name}: giá đang {g:+.2f}% ≤ SL {-sl:+g}% → cắt lỗ NGAY toàn bộ acc này")
+    tips = []
+    if gains and max(gains) >= tp:
+        tips.append(f"TP phải lớn hơn +{max(gains):.2f}% → gợi ý TP ≥ {math.floor(max(gains)) + 1}")
+    if gains and min(gains) <= -sl:
+        good = math.floor(-min(gains)) + 1
+        if good > 0:
+            tips.append(f"SL phải xa hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL ≥ {good}")
+        else:
+            tips.append(f"SL lời phải thấp hơn mức lời hiện tại ({min(gains):+.2f}%) → gợi ý SL = {good} (tức SL lời {-good:+g}%)")
+    return out, tips
+
+
+async def ctp_apply(chat, sym, tp, sl, force=False):
+    hits, tips = ctp_hits(sym, tp, sl)
+    if hits and not force:
+        live["ctp_pending"] = (sym, tp, sl, time.time() + 60)
+        txt = (f"⚠️ TP +{tp:g}% / SL {-sl:+g}% cho {coin_of(sym)} sẽ KHỚP LỆNH NGAY:\n" + "\n".join(hits)
+               + ("\n\n💡 " + "\n💡 ".join(tips) if tips else "")
+               + "\n\nTiếp tục, hoặc Cancel rồi gõ lại số khác. (nút hết hạn sau 60 giây)")
+        rm, _ = await _send(chat, txt, {"inline_keyboard": [[{"text": "✅ Tiếp tục", "callback_data": "ctpok"},
+                                                             {"text": "✖ Cancel", "callback_data": "ctpno"}]]})
+        track_new("ctp_confirm", chat, rm)
+        return
+    live.pop("ctp", None)
+    (cfg.get("tpl_applied") or {}).pop(sym, None)              # sua tay -> template cu khong con dung
+    for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == sym]:
+        cfg["plans"].pop(x)
+    save_cfg()
+    lines = []
+
+    async def one(c, p):
+        e, sd = p["avg"], p["side"]
+        px = cur_price({"symbol": sym, "entry": e})
+        g = (px / e - 1) * 100 * (1 if sd == "Buy" else -1)
+        if g >= tp or g <= -sl:                # da xac nhan -> khop ngay
+            rows = await close_one(c, only=sym)
+            add_realized(rows)
+            pnl = sum(x.get("pnl", 0) for x in rows)
+            okc = rows and all(x.get("ok") for x in rows)
+            return (f"{'✅' if okc else '❌'} {c.name}: {'chốt lời' if g >= tp else 'cắt lỗ'} ngay toàn bộ (giá {g:+.2f}%) "
+                    f"{dot(pnl)} {pnl:+.2f}")
+        tpp, slp = lvl(e, sd, tp), lvl(e, sd, -sl)
+        ok, err = await set_tpsl_one(c, p, tp=tpp, sl=slp)
+        return f"{'✅' if ok else '❌'} {c.name}: TP {num(tpp)} (+{tp:g}%) · SL {num(slp)} ({-sl:+g}%)" + ("" if ok else f" — {err[:60]}")
+    busy["n"] += 1
+    try:
+        lines = await asyncio.gather(*(one(c, p) for c, p in acc_positions(sym)))
+    finally:
+        busy["n"] -= 1
+    track_new("ctp", chat)                     # xoa tin hoi
+    live.update(png_sym=None)
+    live_refresh_now()
+    head = f"✏️ Custom TP-SL — {coin_of(sym)}: TP +{tp:g}% · SL {-sl:+g}% (từ entry từng acc)"
+    log(head)
+    send(chat, head + "\n" + "\n".join(lines))
+
+
 def short_margin(r):
     """Bybit tu choi vi khong du ky quy / so du."""
     m = str(r.get("retMsg", "")).lower()
@@ -2123,6 +2227,7 @@ def live_kb():
     elif top == "tpl":
         rows.append([{"text": "👇 chọn template ở bảng bên dưới", "callback_data": "noop"}])
     elif menu == "tpsl":                              # chua chon TP hay SL
+        rows.append([{"text": "✏️ Enter custom TP-SL", "callback_data": "ctp"}])
         rows.append([{"text": "Edit TP", "callback_data": "m:tp"}])
         rows.append([{"text": "Edit SL", "callback_data": "m:sl"}])
     else:                                             # dang mo Edit TP hoac Edit SL: an nut con lai
@@ -2340,6 +2445,15 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data in ("ctpok", "ctpno"):             # tra loi canh bao Custom TP-SL
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        pend = live.pop("ctp_pending", None)
+        track_new("ctp_confirm", chat)
+        if data == "ctpno" or not pend or pend[3] < time.time():
+            return await answer("Đã huỷ — gõ lại TP SL khác" if data == "ctpno" else "Hết hạn — bấm lại Enter custom TP-SL",
+                                data != "ctpno")
+        asyncio.create_task(answer("Đang đặt…"))
+        return await ctp_apply(chat, pend[0], pend[1], pend[2], force=True)
     if data in ("tplok", "tplno"):             # tra loi canh bao Order Template
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         pend = live.pop("tpl_pending", None)
@@ -2471,6 +2585,13 @@ async def handle_callback(cq):
             asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
         live["confirm"] = None
         return await kb_answer(answer)
+    if data == "ctp":                          # Edit TP & SL -> Enter custom TP-SL
+        sym = sel_sym()
+        if not sym:
+            return await answer("Chọn position trước", True)
+        live["menu"] = None
+        asyncio.create_task(kb_answer(answer))
+        return await ctp_ask(live["chat"] or cfg["bot_owner_id"], sym)
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):
@@ -3739,6 +3860,16 @@ async def handle_update(u):
                 return
             if chat != str(cfg["bot_owner_id"]).strip():
                 send(chat, f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
+                return
+            ctp = live.get("ctp")
+            if ctp and not cmd.startswith("/") and time.time() - ctp["t"] < CTP_TTL and \
+                    (not live.get("cc") or ctp["t"] >= live["cc"]["t"]):
+                v = ctp_parse(m.get("text"))
+                asyncio.create_task(tg_delete(chat, [m.get("message_id")]))
+                if v:
+                    await ctp_apply(chat, ctp["sym"], *v)
+                else:
+                    await ctp_ask(chat, ctp["sym"], "Sai định dạng. Gõ 2 số cách nhau bởi dấu cách: TP SL (vd 10 5).")
                 return
             cc = live.get("cc")
             txt = (m.get("text") or "").strip().replace(",", ".").upper().replace("USDT", "").strip()

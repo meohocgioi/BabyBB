@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.32.0"
+VERSION = "1.32.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.32.1", ["Tin hướng dẫn Custom TP-SL, Trailing Stop, Close Custom Size và cảnh báo khớp lệnh dùng chung 1 kiểu: tiêu đề, bảng thông tin, bảng Cách gõ (chữ mẫu dạng code), ghi chú nhỏ ở cuối"]),
     ("1.32.0", ["Enter custom TP-SL: dấu của SL theo hướng giá so với entry — 50 +5 = SL lời (trên entry 5%), 50 -5 hoặc 50 5 = SL lỗ (dưới entry 5%), 50 0 = SL hoà vốn"]),
     ("1.31.1", ["Mở Custom Trailing / Custom TP-SL / Close Custom Size rồi không gõ mà bấm sang nút khác dưới /status → tin hướng dẫn tự bị xoá, ô nhập huỷ luôn"]),
     ("1.31.0", ["Nút mới dưới /status: Trailing Stop (ngay dưới Close Order) — giống Binance: Callback Rate · Size · Activation Price",
@@ -732,17 +733,27 @@ def cc_plan(info, amount):
     return plan
 
 
+def prompt_blocks(title, info, how, note=None, warn=None, how_head=("Gõ", "Kết quả")):
+    """Mau chung cho moi tin hoi (Close Custom Size / Custom TP-SL / Trailing Stop):
+    tieu de · canh bao · bang thong tin · bang Cach go (o mau code) · ghi chu nho."""
+    blocks = [r_head(title)]
+    if warn:
+        blocks.append(r_par([B("⚠️ " + warn.lstrip("⚠️ "))]))
+    blocks.append(r_table(["", ""], info, [None, "right"], show_header=False))
+    blocks.append(r_table(list(how_head), [[K(r[0])] + list(r[1:]) for r in how]))
+    if note:
+        blocks.append(r_foot(note))
+    return blocks
+
+
 def cc_prompt_blocks(info, warn=None):
     coin = coin_of(info["symbol"])
     R = [["Position", B(f"{side_vn(info['side'])} {coin}")],
          ["Total Size", B(f"{info['total']:.2f} USDT")],
          ["Tối thiểu", f"{info['min']:.2f} USDT"]]
-    blocks = [r_head("✂️ Close Custom Size")]
-    if warn:
-        blocks.append(r_par(warn))
-    blocks += [r_table(["", ""], R, [None, "right"]),
-               r_par(["Enter size to close: ", B("gõ số USDT"), " (vd 200) rồi gửi. Tool chia đều cho các acc."])]
-    return blocks
+    half = max(math.ceil(info["min"]), int(info["total"] / 2))
+    how = [[f"{half}", f"Đóng {half} USDT"], [f"{info['total']:.0f}", "Đóng hết"]]
+    return prompt_blocks("✂️ Close Custom Size", R, how, "Số USDT muốn đóng, tool chia đều cho các acc.", warn)
 
 
 async def cc_ask(chat, warn=None, min_btn=False, symbol=None):
@@ -1318,7 +1329,15 @@ async def trail_ask(chat, sym, warn=None):
             "• 3 20 → chỉ đóng 20 USDT (chia đều các acc)\n"
             f"• 3 all {num(lvl(info['price'], info['side'], 5))} → toàn bộ, chỉ bắt đầu bám khi giá chạm mức này\n"
             "Toàn bộ size: đặt thẳng trên sàn (chạy cả khi tắt máy). Một phần size: tool tự theo dõi (máy phải bật).")
-    rm, _ = await _send(chat, text, {"force_reply": True, "input_field_placeholder": "Callback% [Size] [Activation]  (vd: 3)"})
+    a = num(lvl(info["price"], info["side"], 5))
+    blocks = prompt_blocks("🧵 Trailing Stop",
+                           [["Position", B(f"{side_vn(info['side'])} {coin_of(sym)}")], ["Giá", num(info["price"])],
+                            ["Total Size", f"{info['total']:.2f} USDT"]],
+                           [["3", "Hồi 3% từ đỉnh → đóng toàn bộ"], ["3 20", "Chỉ đóng 20 USDT"],
+                            [f"3 all {a}", f"Toàn bộ, bắt đầu bám khi giá chạm {a}"]],
+                           "Thứ tự: Callback% · Size USDT · Activation Price. Toàn bộ size: đặt trên sàn, chạy cả khi tắt máy. "
+                           "Một phần size: tool tự theo dõi, máy phải bật.", warn)
+    rm, _ = await _send_rich(chat, text, blocks, {"force_reply": True, "input_field_placeholder": "Callback% [Size] [Activation]  (vd: 3)"})
     live["ctr"] = {"t": time.time(), "sym": sym}
     track_new("ctr", chat, rm)
 
@@ -1416,17 +1435,27 @@ async def ctp_ask(chat, sym, warn=None):
     text = ((("⚠️ " + warn + "\n") if warn else "") +
             f"✏️ Custom TP-SL — {side_vn(sd)} {coin_of(sym)} · entry {num(e)} · giá {num(px)} ({gain:+.2f}%)\n"
             "Gõ: TP SL (tính % từ entry của từng acc)\n"
-            "• 50 5 hoặc 50 -5 → TP +50%, SL dưới entry 5% (SL lỗ)\n"
-            "• 50 +5 → TP +50%, SL trên entry 5% (SL lời)\n"
-            "• 50 0 → TP +50%, SL = entry (hoà vốn)")
-    rm, _ = await _send(chat, text, {"force_reply": True, "input_field_placeholder": "TP SL  (vd: 10 5)"})
+            "• 50 -5 → TP +50%, SL −5% (lỗ)\n• 50 +5 → TP +50%, SL +5% (lời)\n• 50 0 → TP +50%, SL hoà vốn")
+    p0 = pos[0][1]
+    cur = " · ".join(x for x in (f"TP {num(float(p0['tp']))}" if float(p0.get("tp") or 0) else "",
+                                f"SL {num(float(p0['sl']))}" if float(p0.get("sl") or 0) else "") if x) or "chưa có"
+    info = [["Position", B(f"{side_vn(sd)} {coin_of(sym)}")], ["Entry", num(e)],
+            ["Giá", f"{num(px)} ({gain:+.2f}%)"], ["Đang đặt", cur]]
+    t50 = f"{num(lvl(e, sd, 50))} · +50%"
+    how = [["50 -5", t50, f"{num(lvl(e, sd, -5))} · −5% lỗ"],
+           ["50 +5", t50, f"{num(lvl(e, sd, 5))} · +5% lời"],
+           ["50 0", t50, f"{num(e)} · hoà vốn"]]
+    blocks = prompt_blocks("✏️ Custom TP-SL", info, how,
+                           "Gõ TP rồi SL, tính % từ entry của từng acc. SL không dấu (50 5) = SL lỗ. Short tự đảo chiều.", warn,
+                           how_head=("Gõ", "TP", "SL"))
+    rm, _ = await _send_rich(chat, text, blocks, {"force_reply": True, "input_field_placeholder": "TP SL  (vd: 50 +5)"})
     live["ctp"] = {"t": time.time(), "sym": sym}
     track_new("ctp", chat, rm)
 
 
 def ctp_hits(sym, tp, sl):
     """Acc nao se KHOP NGAY voi TP/SL nay + goi y muc an toan. -> (dong canh bao, goi y)"""
-    out, gains = [], []
+    out, gains, rows = [], [], []
     for c, p in acc_positions(sym):
         e, sd = p["avg"], p["side"]
         px = cur_price({"symbol": sym, "entry": e})
@@ -1434,31 +1463,36 @@ def ctp_hits(sym, tp, sl):
         gains.append(g)
         if g >= tp:
             out.append(f"🏁 {c.name}: giá đang {g:+.2f}% ≥ TP +{tp:g}% → chốt lời NGAY toàn bộ acc này")
+            rows.append([c.name, f"{g:+.2f}%", "🏁 chạm TP"])
         elif g <= -sl:
             out.append(f"💀 {c.name}: giá đang {g:+.2f}% ≤ SL {pct_lbl(-sl)} → đóng NGAY toàn bộ acc này")
+            rows.append([c.name, f"{g:+.2f}%", "💀 chạm SL"])
     tips = []
     if gains and max(gains) >= tp:
-        tips.append(f"TP phải lớn hơn +{max(gains):.2f}% → gợi ý TP ≥ {math.floor(max(gains)) + 1}")
+        tips.append(("TP", f"{math.floor(max(gains)) + 1}", f"trở lên · giá đang {max(gains):+.2f}%"))
     if gains and min(gains) <= -sl:
         good = math.floor(-min(gains)) + 1
-        if good > 0:
-            tips.append(f"SL phải thấp hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL -{good} hoặc thấp hơn")
-        elif good == 0:
-            tips.append(f"SL phải thấp hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL 0 (hoà vốn) hoặc thấp hơn")
-        else:
-            tips.append(f"SL lời phải thấp hơn mức lời hiện tại ({min(gains):+.2f}%) → gợi ý SL +{-good} hoặc thấp hơn")
-    return out, tips
+        sug = f"-{good}" if good > 0 else "0" if good == 0 else f"+{-good}"
+        tips.append(("SL", sug, f"hoặc thấp hơn · giá đang {min(gains):+.2f}%"))
+    return out, tips, rows
 
 
 async def ctp_apply(chat, sym, tp, sl, force=False):
-    hits, tips = ctp_hits(sym, tp, sl)
+    hits, tips, hrows = ctp_hits(sym, tp, sl)
     if hits and not force:
         live["ctp_pending"] = (sym, tp, sl, time.time() + 60)
         txt = (f"⚠️ TP +{tp:g}% / SL {pct_lbl(-sl)} cho {coin_of(sym)} sẽ KHỚP LỆNH NGAY:\n" + "\n".join(hits)
-               + ("\n\n💡 " + "\n💡 ".join(tips) if tips else "")
+               + ("\n\n💡 " + "\n💡 ".join(f"{k} {v} ({w})" for k, v, w in tips) if tips else "")
                + "\n\nTiếp tục, hoặc Cancel rồi gõ lại số khác. (nút hết hạn sau 60 giây)")
-        rm, _ = await _send(chat, txt, {"inline_keyboard": [[{"text": "✅ Tiếp tục", "callback_data": "ctpok"},
-                                                             {"text": "✖ Cancel", "callback_data": "ctpno"}]]})
+        blocks = [r_head("⚠️ Sẽ khớp lệnh ngay"),
+                  r_par([f"TP +{tp:g}% · SL {pct_lbl(-sl)} cho ", B(coin_of(sym)), " — các acc này sẽ bị đóng ngay:"]),
+                  r_table(["Acc", "Giá", "Lý do"], hrows, [None, "right", None])]
+        if tips:
+            blocks += [r_par([B("💡 Gợi ý để không bị khớp")]),
+                       r_table(["", "Nên gõ", ""], [[k, K(v), w] for k, v, w in tips], show_header=False)]
+        blocks.append(r_foot("Tiếp tục: acc chạm mức bị đóng ngay, acc còn lại được đặt TP/SL. Cancel: gõ lại số khác. Nút hết hạn sau 60 giây."))
+        rm, _ = await _send_rich(chat, txt, blocks, {"inline_keyboard": [[{"text": "✅ Tiếp tục", "callback_data": "ctpok"},
+                                                                         {"text": "✖ Cancel", "callback_data": "ctpno"}]]})
         track_new("ctp_confirm", chat, rm)
         return
     live.pop("ctp", None)

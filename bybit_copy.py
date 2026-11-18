@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.25.1"
+VERSION = "1.25.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.25.2", ["Đổi tên 3 nút /status cho gọn: 1m 📊 · Bar v1 · Bar v2"]),
     ("1.25.1", ["/status có 3 nút trên 1 dòng: 1m Candle · Health Bar (ảnh) · Health Bar v2 (chữ, mặc định)"]),
     ("1.25.0", ["Health Bar mới bằng chữ (không còn ảnh): thanh 🏁 Tới TP / 💀 Tới SL kiểu game, % quãng đường đã đi",
                 "Lãi/lỗ dự kiến khi chạm TP / SL (tổng các acc, đã trừ phí) — số lãi viên xanh, số lỗ viên đỏ; uPnL hiện tại cũng có màu",
@@ -1972,7 +1973,7 @@ async def handle_callback(cq):
         if live_view() == want:
             return await answer()
         live["view"] = want
-        asyncio.create_task(answer({"hb": "Health Bar", "hb2": "Health Bar v2", "c1": "1m Candle"}[want]))
+        asyncio.create_task(answer({"hb": "Bar v1", "hb2": "Bar v2", "c1": "1m 📊"}[want]))
         tgs = [t for t in chart_targets() if t.get("entry")]
         if tgs:
             try:
@@ -2058,7 +2059,7 @@ def view_buttons():
     """3 nut chon kieu hien thi tren 1 dong, kieu dang chon co dau ✅."""
     v = live_view()
     return [{"text": ("✅ " if v == k else "⬜ ") + t, "callback_data": f"v:{k}"}
-            for k, t in (("c1", "1m Candle"), ("hb", "Health Bar"), ("hb2", "Health Bar v2"))]
+            for k, t in (("c1", "1m 📊"), ("hb", "Bar v1"), ("hb2", "Bar v2"))]
 
 
 def live_stamp():

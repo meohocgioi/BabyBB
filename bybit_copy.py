@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.28.0"
+VERSION = "1.28.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.28.1", ["/status luôn ghi dòng 📋 Template cho từng coin (chưa áp dụng / TP v1 / TP v2 / Part-TP v1 đang ở mốc nào), ở mọi kiểu hiển thị"]),
     ("1.28.0", ["Nút mới dưới /status: Order Template → 🧑🏻‍🤝‍🧑🏻TP v1 / 🧑🏻‍🤝‍🧑🏻TP v2 / Part-TP v1 (TP / SL riêng từng acc, tính từ entry của từng acc)",
                 "TP v2: SL lời chưa đặt được thì tạm để −2%, tool tự dời lên khi giá vượt qua; Part-TP v1: tool tự chốt dần ở +3/5/7/10/15% và dời SL",
                 "/status ghi template đang chạy; sửa lỗi bấm lại Close Order mở nhầm menu Edit TP & SL"]),
@@ -979,6 +980,7 @@ async def apply_template(k, sym):
                              + ("" if ok else f" — {err[:60]}"))
     finally:
         busy["n"] -= 1
+    cfg.setdefault("tpl_applied", {})[sym] = k
     save_cfg()
     live.update(png_sym=None)
     head = f"📋 {title} — {coin_of(sym)}"
@@ -993,22 +995,24 @@ async def cancel_plans(sym):
     gone = [x for x, pl in plans.items() if pl.get("sym") == sym]
     for x in gone:
         plans.pop(x)
+    (cfg.get("tpl_applied") or {}).pop(sym, None)
     save_cfg()
     return f"✖ Đã huỷ template của {coin_of(sym)} ({len(gone)} acc). TP / SL đang đặt trên sàn giữ nguyên."
 
 
 def plan_note(sym):
-    """1 dong tren /status: template dang chay cua coin nay."""
+    """1 dong tren /status: template dang ap dung cho coin nay."""
     pl = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym]
+    applied = (cfg.get("tpl_applied") or {}).get(sym)
     if not pl:
-        return ""
+        return f"📋 Template: {TEMPLATES[applied][0]} (đã đặt TP / SL)" if applied in TEMPLATES else "📋 Template: chưa áp dụng"
     ptp = [x for x in pl if x["type"] == "ptp"]
     if ptp:
         st = min(x["step"] for x in ptp)
         nxt = f" · mốc tiếp +{PTP_STEPS[st][0]:g}%" if st < len(PTP_STEPS) else ""
-        return f"📋 Part-TP v1: đã qua {st}/{len(PTP_STEPS)} mốc{nxt}"
+        return f"📋 Template: Part-TP v1 · đã qua {st}/{len(PTP_STEPS)} mốc{nxt}"
     w = [x["acc"] for x in pl if x["type"] == "slwait"]
-    return f"📋 Chờ dời SL lời: {', '.join(w)}" if w else ""
+    return f"📋 Template: TP v2 · chờ dời SL lời: {', '.join(w)}" if w else "📋 Template: TP v2"
 
 
 async def plan_step(key, pl, c, p, px):
@@ -1050,6 +1054,11 @@ async def plan_loop():
     Cac acc duoc xu ly CUNG LUC de khong cham."""
     while True:
         await asyncio.sleep(1)
+        ap = cfg.get("tpl_applied") or {}
+        if ap and all((status.get(c.name) or {}).get("t") for c in clients):
+            open_syms = {p["symbol"] for c in clients for p in (status.get(c.name) or {}).get("positions") or []}
+            for sym in [x for x in ap if x not in open_syms]:
+                ap.pop(sym); save_cfg()        # position da dong het -> template ket thuc
         plans = cfg.get("plans") or {}
         if not plans or busy["n"]:
             continue
@@ -1568,6 +1577,7 @@ def status_blocks(title=None, stamp=None, photos=None):
             blocks.append(r_par(hb_parts(g, tgs.get(sym), sd, live_view())))
         elif photos and photos.get(sym):
             blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
+        blocks.append(r_par(plan_note(sym)))               # template dang chay cua coin nay
         levs = sorted({float(x) for x in g["lev"]})
         lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
         pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
@@ -1666,9 +1676,6 @@ def hb_parts(g, tg, sd, style="hb2"):
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
         parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
                   "\n"] + (lambda b: b if isinstance(b, list) else [b])(hb_bar(frac, key == "tp", style))
-    note = plan_note(tg["symbol"]) if tg else ""
-    if note:
-        parts.append("\n" + note)
     return parts
 
 
@@ -2053,6 +2060,15 @@ def sel_sym():
 
 
 async def set_tpsl_all(kind, pct, only=None):
+    if only:                                   # sua TP / SL tay -> template cu khong con dung
+        (cfg.get("tpl_applied") or {}).pop(only, None)
+        for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == only]:
+            cfg["plans"].pop(x)
+        save_cfg()
+    return await _set_tpsl_all(kind, pct, only)
+
+
+async def _set_tpsl_all(kind, pct, only=None):
     """Dat lai TP (kind='tp') hoac SL (kind='sl') = entry ± pct% cho moi position tren moi acc; pct = 0 -> go bo.
     -> ban tom tat"""
     busy["n"] += 1

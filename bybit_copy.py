@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.25.2"
+VERSION = "1.25.3"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.25.3", ["Bar v2: thay chữ \"dự kiến\" bằng % của TP / SL so với entry, vd Tới TP 4.38 (+29.97%)"]),
     ("1.25.2", ["Đổi tên 3 nút /status cho gọn: 1m 📊 · Bar v1 · Bar v2"]),
     ("1.25.1", ["/status có 3 nút trên 1 dòng: 1m Candle · Health Bar (ảnh) · Health Bar v2 (chữ, mặc định)"]),
     ("1.25.0", ["Health Bar mới bằng chữ (không còn ảnh): thanh 🏁 Tới TP / 💀 Tới SL kiểu game, % quãng đường đã đi",
@@ -1398,7 +1399,8 @@ def hb_parts(g, tg, sd):
         moved = (price - entry) * d if key == "tp" else (entry - price) * d
         frac = clamp(moved / span) if span > 0 else 0.0
         n = int(round(frac * 10))
-        parts += [f"{icon} Tới {lab} {num(lv)} · dự kiến ", chip(f"{exp:+.2f} USDT", exp >= 0),
+        mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
+        parts += [f"{icon} Tới {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f} USDT", exp >= 0),
                   f"\n{full * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"]
     parts.append(f"\nEntry {num(entry)}")
     return parts

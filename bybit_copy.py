@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.24.2"
+VERSION = "1.25.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.25.0", ["Health Bar mới bằng chữ (không còn ảnh): thanh 🏁 Tới TP / 💀 Tới SL kiểu game, % quãng đường đã đi",
+                "Lãi/lỗ dự kiến khi chạm TP / SL (tổng các acc, đã trừ phí) — số lãi viên xanh, số lỗ viên đỏ; uPnL hiện tại cũng có màu",
+                "Nhẹ hơn nhiều cho Telegram: Health Bar không phải tải ảnh lên mỗi lần cập nhật"]),
     ("1.24.2", ["Giảm số lần sửa tin /status (5s/lần, Health Bar 10s/lần) để Telegram không khoá bot hàng giờ vì sửa tin quá dày",
                 "Bị Telegram giới hạn: tool chờ đúng thời gian Telegram yêu cầu và tự sửa chậm lại, không gửi dồn thêm"]),
     ("1.24.1", ["Sửa: /update xong không thấy change log — giờ change log gửi riêng và tự thử lại tới khi gửi được",
@@ -1298,10 +1301,15 @@ def status_blocks(title=None, stamp=None, photos=None):
     G = status_groups()
     order = sorted(G, key=lambda k: -G[k]["val"])
     det = live.get("detail") or set()
+    if G and botst.get("rich_buttons") is not False:      # [1m Candle] [Health Bar] ngay duoi tieu de
+        blocks.append({"type": "buttons", "buttons": view_buttons()})
+    tgs = {t["symbol"]: t for t in chart_targets()} if G else {}
     for key in order:
         sym, sd = key
         g = G[key]
-        if photos and photos.get(sym):
+        if live_view() == "hb":                            # Health Bar bang chu, khong con anh
+            blocks.append(r_par(hb_parts(g, tgs.get(sym), sd)))
+        elif photos and photos.get(sym):
             blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
         levs = sorted({float(x) for x in g["lev"]})
         lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
@@ -1352,6 +1360,46 @@ def acc_button(n, sym):
     on = sym in (live.get("detail") or set())
     return {"text": ("▾ " if on else "▸ ") + (f"{n} acc" if botst.get("rich_buttons") is not False else f"{n} acc {coin_of(sym)}"),
             "callback_data": f"dt:{sym}"}
+
+
+TAKER_FEE = 0.00055        # phi dong lenh market (taker) cua Bybit, de uoc tinh lai/lo du kien
+
+
+def chip(text, good):
+    """So co mau: vien nut xanh (lai) / do (lo) nam trong dong chu. Telegram khong nhan -> chu kem cham mau."""
+    if botst.get("rich_buttons") is False:
+        return f"{'🟢' if good else '🔴'} {text}"
+    b = {"text": text, "callback_data": "noop"}
+    if botst.get("chip_style") is not False:
+        b["style"] = "success" if good else "danger"
+    return {"type": "button", "button": b}
+
+
+def hb_parts(g, tg, sd):
+    """Health Bar bang chu: 2 thanh mau 'Toi TP' / 'Toi SL' + lai/lo du kien (tong cac acc, da tru phi)."""
+    qty, entry = g["qty"], g["val"] / g["qty"]
+    price = cur_price(tg) if tg else entry
+    d = 1 if sd == "Buy" else -1
+    pct = (price / entry - 1) * 100 * d if entry else 0.0
+    up = g["pnl"]
+    clamp = lambda x: min(1.0, max(0.0, x))
+    parts = [f"{dot(up)} {coin_of(tg['symbol'] if tg else '')} {side_vn(sd)} · {num(price)} · {pct:+.2f}% · uPnL ",
+             chip(f"{up:+.2f}", up >= 0)]
+    for icon, lab, key, full in (("🏁", "TP", "tp", "🟩"), ("💀", "SL", "sl", "🟥")):
+        lv = (tg or {}).get(key)
+        parts.append("\n")
+        if not lv:
+            parts += [f"{icon} {lab} chưa đặt"]
+            continue
+        exp = qty * (lv - entry) * d - g["fee"] - qty * lv * TAKER_FEE
+        span = (lv - entry) * d if key == "tp" else (entry - lv) * d
+        moved = (price - entry) * d if key == "tp" else (entry - price) * d
+        frac = clamp(moved / span) if span > 0 else 0.0
+        n = int(round(frac * 10))
+        parts += [f"{icon} Tới {lab} {num(lv)} · dự kiến ", chip(f"{exp:+.2f} USDT", exp >= 0),
+                  f"\n{full * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"]
+    parts.append(f"\nEntry {num(entry)}")
+    return parts
 
 
 def acc_cell(n, sym):
@@ -1637,6 +1685,12 @@ async def _send_rich(chat, text, blocks, kb=None, rebuild=None):
             if "Too Many Requests" in desc:
                 log(f"Telegram đang giới hạn tốc độ gửi tin (chờ {flood_wait():.0f}s) — bỏ qua tin này")
                 return None, False
+            if rebuild and "style" in desc.lower() and botst.get("chip_style") is not False:
+                botst["chip_style"] = False
+                log(f"Telegram không nhận màu nút ({desc[:100]}) — hiện số không màu")
+                blocks, kb2 = rebuild()
+                extra = {"reply_markup": kb2} if kb2 else {}
+                continue
             if rebuild and "button" in desc.lower() and botst.get("rich_buttons") is not False:
                 botst["rich_buttons"] = False
                 log(f"Telegram không nhận nút trong tin ({desc[:100]}) — chuyển nút xuống dưới tin")
@@ -1676,7 +1730,7 @@ def live_kb():
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
-    rows = [view_buttons()] if botst.get("rich_buttons") is False and live.get("pngs") and not photo_paused() else []
+    rows = [view_buttons()] if botst.get("rich_buttons") is False else []
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
         G = status_groups()
         rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
@@ -2085,9 +2139,8 @@ async def live_edit(chat, mid, rich, final=False):
         files = {names[sym]: im for sym, im in pngs.items()}
         photos = {sym: f"attach://{n}" for sym, n in names.items()}
         blocks = status_blocks(stamp=stamp, photos=photos)
-        btn = [] if botst.get("rich_buttons") is False else [{"type": "buttons", "buttons": view_buttons()}]
-        f = {"chat_id": str(chat), "message_id": str(mid),
-             "rich_message": {"blocks": [blocks[0]] + btn + blocks[1:]}}
+        btn = botst.get("rich_buttons") is not False
+        f = {"chat_id": str(chat), "message_id": str(mid), "rich_message": {"blocks": blocks}}
         if kb:
             f["reply_markup"] = kb
         r = await bot_form("editMessageText", f, files)
@@ -2096,7 +2149,7 @@ async def live_edit(chat, mid, rich, final=False):
             botst["rich_details"] = False      # Telegram chua co block details -> quay ve bang day du
             log(f"/status: Telegram không nhận khối thu gọn ({desc[:100]}) — hiện bảng đầy đủ")
             blocks, kb = status_blocks(stamp=stamp, photos=photos), live_kb()
-            f["rich_message"] = {"blocks": [blocks[0]] + btn + blocks[1:]}
+            f["rich_message"] = {"blocks": blocks}
             if kb:
                 f["reply_markup"] = kb
             r = await bot_form("editMessageText", f, files)
@@ -2124,6 +2177,12 @@ async def live_edit(chat, mid, rich, final=False):
         p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
         r = await bot_api("editMessageText", _quiet=True, **p)
         desc = str(r.get("description") or "")
+        if not r.get("ok") and "style" in desc.lower() and botst.get("chip_style") is not False:
+            botst["chip_style"] = False
+            log(f"/status: Telegram không nhận màu nút ({desc[:100]}) — hiện số không màu")
+            p["rich_message"] = {"blocks": status_blocks(stamp=stamp)}
+            r = await bot_api("editMessageText", _quiet=True, **p)
+            desc = str(r.get("description") or "")
         if not r.get("ok") and "button" in desc.lower() and botst.get("rich_buttons") is not False:
             botst["rich_buttons"] = False
             log(f"/status: Telegram không nhận nút trong tin ({desc[:100]}) — chuyển nút xuống dưới tin")
@@ -2640,9 +2699,9 @@ def set_pngs(pngs, key):
 
 
 async def render_one(tg):
-    """1 anh cho 1 coin theo che do dang chon. Health bar: ve ngay. Nen 1m: lay nen tu Bybit."""
+    """1 anh chart nen 1m cho 1 coin (Health Bar nay la chu, khong can anh)."""
     if live_view() == "hb":
-        return await asyncio.to_thread(render_health, tg, cur_price(tg))
+        return None
     candles = await fetch_candles(tg["symbol"])
     if len(candles) < 2:
         return (live.get("pngs") or {}).get(tg["symbol"])
@@ -2675,7 +2734,7 @@ async def chart_loop():
         await asyncio.sleep(1)
         try:
             on = live["mid"] and live["rich"] and cfg["bot_token"]
-            tgs = [t for t in (chart_targets() if on else []) if t.get("entry")]
+            tgs = [t for t in (chart_targets() if on else []) if t.get("entry")] if live_view() == "c1" else []
             if not tgs:
                 if live.get("pngs"):
                     live.update(pngs=None, png_sym=None, png_v=live.get("png_v", 0) + 1)

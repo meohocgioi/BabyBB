@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.26.0"
+VERSION = "1.27.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.27.0", ["Bar v3: thanh mảnh 20 ô [ ▰▰▰▱▱… ] cho TP / SL — chi tiết gấp đôi, không bị xuống dòng trên điện thoại",
+                "Chọn kiểu hiển thị /status (1m 📊 / Bar v1 / Bar v2 / Bar v3) chuyển vào /setting; tool nhớ lựa chọn. /status gọn hơn, bỏ hàng 3 nút"]),
     ("1.26.0", ["Lệnh /setting: Auto Refresh content — chọn 3s / 5s / 10s cho mọi nội dung tự cập nhật (/status, Bar v1, Bar v2, chart 1m). Mặc định 5s"]),
     ("1.25.4", ["Bar v2 gọn hơn: dòng đầu ghi Entry thay cho uPnL (uPnL đã có trong bảng), bỏ chữ \"Tới\" và \"USDT\""]),
     ("1.25.3", ["Bar v2: thay chữ \"dự kiến\" bằng % của TP / SL so với entry, vd Tới TP 4.38 (+29.97%)"]),
@@ -167,7 +169,8 @@ DEFAULT_CFG = {
     "allin_lev": "",                # don bay /lev cho moi lenh: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
-    "refresh": 5,                   # giay giua 2 lan tu cap nhat noi dung (/status, Health Bar, chart): 3 / 5 / 10
+    "refresh": 5,
+    "view": "hb2",                  # kieu hien thi /status: c1 (chart 1m) / hb (Bar v1 anh) / hb2 (Bar v2) / hb3 (Bar v3)                   # giay giua 2 lan tu cap nhat noi dung (/status, Health Bar, chart): 3 / 5 / 10
     "update_url": DEFAULT_UPDATE_URL,
     "running": False,
 }
@@ -850,18 +853,24 @@ async def close_watch_loop():
 
 
 def setting_blocks(note=None):
-    cur = refresh_s()
-    blocks = [r_head("⚙️ Setting"),
-              r_par(["Auto Refresh content: ", B(f"{cur}s / lần"),
-                     "\nÁp dụng cho mọi nội dung tự cập nhật: bảng /status, Bar v1, Bar v2, chart 1m."])]
+    cur, view = refresh_s(), live_view()
+    vbtns = [{"text": ("✅ " if view == k else "⬜ ") + t, "callback_data": f"v:{k}"} for k, t in VIEWS]
     btns = [{"text": ("✅ " if cur == v else "") + f"{v}s", "callback_data": f"rf:{v}"} for v in REFRESH_CHOICES]
-    if botst.get("rich_buttons") is not False:
+    inline = botst.get("rich_buttons") is not False
+    blocks = [r_head("⚙️ Setting"),
+              r_par(["Hiển thị /status: ", B(dict(VIEWS)[view]),
+                     "\n1m 📊 chart nến · Bar v1 ảnh · Bar v2 ô màu · Bar v3 thanh mảnh 20 ô"])]
+    if inline:
+        blocks.append({"type": "buttons", "buttons": vbtns})
+    blocks.append(r_par(["Auto Refresh content: ", B(f"{cur}s / lần"),
+                         "\nÁp dụng cho mọi nội dung tự cập nhật: bảng /status, Bar v1/v2/v3, chart 1m."]))
+    if inline:
         blocks.append({"type": "buttons", "buttons": btns})
     blocks.append(r_par("⚠️ 3s: dễ bị Telegram giới hạn (khoá bot vài giờ) nếu để /status chạy lâu. Khuyên dùng 5s."))
     if note:
         blocks.append(r_par(note))
     blocks.append(r_foot(f"Last Update: {datetime.now().strftime('%H:%M:%S')}"))
-    kb = None if botst.get("rich_buttons") is not False else {"inline_keyboard": [btns]}
+    kb = None if inline else {"inline_keyboard": [vbtns, btns]}
     return blocks, kb
 
 
@@ -1329,14 +1338,12 @@ def status_blocks(title=None, stamp=None, photos=None):
     G = status_groups()
     order = sorted(G, key=lambda k: -G[k]["val"])
     det = live.get("detail") or set()
-    if G and botst.get("rich_buttons") is not False:      # [1m Candle] [Health Bar] ngay duoi tieu de
-        blocks.append({"type": "buttons", "buttons": view_buttons()})
     tgs = {t["symbol"]: t for t in chart_targets()} if G else {}
     for key in order:
         sym, sd = key
         g = G[key]
-        if live_view() == "hb2":                           # Health Bar v2 bang chu, khong can anh
-            blocks.append(r_par(hb_parts(g, tgs.get(sym), sd)))
+        if live_view() in ("hb2", "hb3"):                  # Health Bar bang chu, khong can anh
+            blocks.append(r_par(hb_parts(g, tgs.get(sym), sd, live_view())))
         elif photos and photos.get(sym):
             blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
         levs = sorted({float(x) for x in g["lev"]})
@@ -1403,7 +1410,16 @@ def chip(text, good):
     return {"type": "button", "button": b}
 
 
-def hb_parts(g, tg, sd):
+def hb_bar(frac, good, style):
+    """v2: 10 o emoji mau. v3: 20 o unicode manh (khong xuong dong tren dien thoai)."""
+    if style == "hb3":
+        n = int(round(frac * 20))
+        return f"[ {'▰' * n}{'▱' * (20 - n)} ] {frac * 100:.0f}%"
+    n = int(round(frac * 10))
+    return f"{('🟩' if good else '🟥') * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"
+
+
+def hb_parts(g, tg, sd, style="hb2"):
     """Health Bar bang chu: 2 thanh mau 'Toi TP' / 'Toi SL' + lai/lo du kien (tong cac acc, da tru phi)."""
     qty, entry = g["qty"], g["val"] / g["qty"]
     price = cur_price(tg) if tg else entry
@@ -1425,7 +1441,7 @@ def hb_parts(g, tg, sd):
         n = int(round(frac * 10))
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
         parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
-                  f"\n{full * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"]
+                  "\n" + hb_bar(frac, key == "tp", style)]
     return parts
 
 
@@ -1630,7 +1646,7 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cố định cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
-    ("/setting", "Cài đặt: Auto Refresh content 3s / 5s / 10s"),
+    ("/setting", "Cài đặt: kiểu hiển thị /status (1m 📊 / Bar v1 / v2 / v3) và Auto Refresh 3s / 5s / 10s"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
@@ -1758,7 +1774,7 @@ def live_kb():
              {"text": "✖ Huỷ", "callback_data": "no"}]]}
     menu = live.get("menu")
     mark = lambda on, t: ("▾ " if on else "") + t
-    rows = [view_buttons()] if botst.get("rich_buttons") is False else []
+    rows = []
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
         G = status_groups()
         rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
@@ -1965,6 +1981,28 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data.startswith("v:"):                  # /setting -> kieu hien thi /status
+        want = data[2:]
+        if want not in dict(VIEWS):
+            return await answer()
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        cfg["view"] = want; save_cfg()
+        log(f"⚙️ Hiển thị /status: {dict(VIEWS)[want]} (từ Telegram)")
+        asyncio.create_task(answer(dict(VIEWS)[want]))
+        blocks, kb = setting_blocks(f"✅ /status hiển thị {dict(VIEWS)[want]}.")
+        p = {"chat_id": chat, "message_id": mid, "rich_message": {"blocks": blocks}}
+        if kb:
+            p["reply_markup"] = kb
+        await bot_api("editMessageText", _quiet=True, **p)
+        tgs = [t for t in chart_targets() if t.get("entry")]
+        if live.get("mid"):
+            try:
+                if tgs:
+                    await render_view(tgs)
+            except Exception as e:
+                log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
+            await edit_now()                   # doi ngay tin /status dang chay
+        return
     if data.startswith("rf:"):                 # /setting -> Auto Refresh content
         try:
             v = int(data[3:])
@@ -2010,19 +2048,6 @@ async def handle_callback(cq):
         det.symmetric_difference_update({sym})
         live["detail"] = det
         asyncio.create_task(answer())
-        return await edit_now()
-    if data in ("v:hb", "v:c1", "v:hb2"):     # chon 1m Candle / Health Bar / Health Bar v2
-        want = data[2:]
-        if live_view() == want:
-            return await answer()
-        live["view"] = want
-        asyncio.create_task(answer({"hb": "Bar v1", "hb2": "Bar v2", "c1": "1m 📊"}[want]))
-        tgs = [t for t in chart_targets() if t.get("entry")]
-        if tgs:
-            try:
-                await render_view(tgs)           # ve ngay de doi anh cung luc voi dau ✅
-            except Exception as e:
-                log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
         return await edit_now()
     if data.startswith("ps:"):                 # chon position cho Close Order / Edit TP & SL
         live["sel"] = data[3:] or None
@@ -2164,7 +2189,6 @@ async def start_live(chat, user_mid=None):
     live_stop()
     live["confirm"] = None
     live["menu"] = None
-    live["view"] = "hb2"                       # moi tin /status mac dinh la Health Bar v2 (chu)
     live["detail"] = set()                     # mac dinh: gon, an bang tung acc
     live["sel"] = None
     live.update(pngs=None, png_sym=None)
@@ -2735,8 +2759,12 @@ async def fetch_candles(symbol):
     return [(int(x[0]) / 1000, float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in rows]
 
 
+VIEWS = (("c1", "1m 📊"), ("hb", "Bar v1"), ("hb2", "Bar v2"), ("hb3", "Bar v3"))
+
+
 def live_view():
-    return live.get("view") or "hb2"         # mac dinh: Health Bar v2 (chu)
+    v = cfg.get("view") or "hb2"             # chon trong /setting, nho lai sau khi khoi dong lai
+    return v if v in dict(VIEWS) else "hb2"
 
 
 def cur_price(tg):
@@ -2753,7 +2781,7 @@ def set_pngs(pngs, key):
 
 async def render_one(tg):
     """1 anh cho 1 coin: Health Bar (anh) hoac chart nen 1m. Health Bar v2 la chu -> khong can anh."""
-    if live_view() == "hb2":
+    if live_view() in ("hb2", "hb3"):
         return None
     if live_view() == "hb":
         return await asyncio.to_thread(render_health, tg, cur_price(tg))

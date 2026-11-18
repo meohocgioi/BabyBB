@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.31.1"
+VERSION = "1.32.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.32.0", ["Enter custom TP-SL: dấu của SL theo hướng giá so với entry — 50 +5 = SL lời (trên entry 5%), 50 -5 hoặc 50 5 = SL lỗ (dưới entry 5%), 50 0 = SL hoà vốn"]),
     ("1.31.1", ["Mở Custom Trailing / Custom TP-SL / Close Custom Size rồi không gõ mà bấm sang nút khác dưới /status → tin hướng dẫn tự bị xoá, ô nhập huỷ luôn"]),
     ("1.31.0", ["Nút mới dưới /status: Trailing Stop (ngay dưới Close Order) — giống Binance: Callback Rate · Size · Activation Price",
                 "Bấm nhanh 1% / 2% / 3% / 5% / 10%: đặt Trailing toàn bộ position trên sàn Bybit (chạy cả khi tắt máy)",
@@ -1390,15 +1391,17 @@ CTP_TTL = 300
 
 
 def ctp_parse(txt):
-    """'10 5' / '10% 5%' / '10/5' -> (10.0, 5.0) hoac None."""
+    """'TP SL' -> (tp, sl) voi sl = % LO tinh tu entry (am = SL loi). Dau cua SL theo huong gia so voi entry:
+    '50 +5' -> SL tren entry 5% (SL loi) · '50 -5' / '50 5' -> SL duoi entry 5% (SL lo) · '50 0' -> SL = entry."""
     t = (txt or "").replace("%", " ").replace("/", " ").replace(";", " ").strip()
-    parts = t.replace(",", ".").split()
+    parts = t.replace(",", ".").replace("−", "-").split()
     if len(parts) != 2:
         return None
     try:
-        tp, sl = float(parts[0]), float(parts[1])
+        tp, v = float(parts[0]), float(parts[1])
     except ValueError:
         return None
+    sl = -abs(v) if parts[1].startswith("+") else abs(v)
     return (tp, sl) if tp > 0 else None
 
 
@@ -1412,7 +1415,10 @@ async def ctp_ask(chat, sym, warn=None):
     gain = (px / e - 1) * 100 * (1 if sd == "Buy" else -1)
     text = ((("⚠️ " + warn + "\n") if warn else "") +
             f"✏️ Custom TP-SL — {side_vn(sd)} {coin_of(sym)} · entry {num(e)} · giá {num(px)} ({gain:+.2f}%)\n"
-            "Gõ: TP SL (tính % từ entry của từng acc)\nVd: 10 5 → TP +10%, SL −5%")
+            "Gõ: TP SL (tính % từ entry của từng acc)\n"
+            "• 50 5 hoặc 50 -5 → TP +50%, SL dưới entry 5% (SL lỗ)\n"
+            "• 50 +5 → TP +50%, SL trên entry 5% (SL lời)\n"
+            "• 50 0 → TP +50%, SL = entry (hoà vốn)")
     rm, _ = await _send(chat, text, {"force_reply": True, "input_field_placeholder": "TP SL  (vd: 10 5)"})
     live["ctp"] = {"t": time.time(), "sym": sym}
     track_new("ctp", chat, rm)
@@ -1429,16 +1435,18 @@ def ctp_hits(sym, tp, sl):
         if g >= tp:
             out.append(f"🏁 {c.name}: giá đang {g:+.2f}% ≥ TP +{tp:g}% → chốt lời NGAY toàn bộ acc này")
         elif g <= -sl:
-            out.append(f"💀 {c.name}: giá đang {g:+.2f}% ≤ SL {-sl:+g}% → cắt lỗ NGAY toàn bộ acc này")
+            out.append(f"💀 {c.name}: giá đang {g:+.2f}% ≤ SL {pct_lbl(-sl)} → đóng NGAY toàn bộ acc này")
     tips = []
     if gains and max(gains) >= tp:
         tips.append(f"TP phải lớn hơn +{max(gains):.2f}% → gợi ý TP ≥ {math.floor(max(gains)) + 1}")
     if gains and min(gains) <= -sl:
         good = math.floor(-min(gains)) + 1
         if good > 0:
-            tips.append(f"SL phải xa hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL ≥ {good}")
+            tips.append(f"SL phải thấp hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL -{good} hoặc thấp hơn")
+        elif good == 0:
+            tips.append(f"SL phải thấp hơn mức giá hiện tại ({min(gains):+.2f}%) → gợi ý SL 0 (hoà vốn) hoặc thấp hơn")
         else:
-            tips.append(f"SL lời phải thấp hơn mức lời hiện tại ({min(gains):+.2f}%) → gợi ý SL = {good} (tức SL lời {-good:+g}%)")
+            tips.append(f"SL lời phải thấp hơn mức lời hiện tại ({min(gains):+.2f}%) → gợi ý SL +{-good} hoặc thấp hơn")
     return out, tips
 
 
@@ -1446,7 +1454,7 @@ async def ctp_apply(chat, sym, tp, sl, force=False):
     hits, tips = ctp_hits(sym, tp, sl)
     if hits and not force:
         live["ctp_pending"] = (sym, tp, sl, time.time() + 60)
-        txt = (f"⚠️ TP +{tp:g}% / SL {-sl:+g}% cho {coin_of(sym)} sẽ KHỚP LỆNH NGAY:\n" + "\n".join(hits)
+        txt = (f"⚠️ TP +{tp:g}% / SL {pct_lbl(-sl)} cho {coin_of(sym)} sẽ KHỚP LỆNH NGAY:\n" + "\n".join(hits)
                + ("\n\n💡 " + "\n💡 ".join(tips) if tips else "")
                + "\n\nTiếp tục, hoặc Cancel rồi gõ lại số khác. (nút hết hạn sau 60 giây)")
         rm, _ = await _send(chat, txt, {"inline_keyboard": [[{"text": "✅ Tiếp tục", "callback_data": "ctpok"},
@@ -1473,7 +1481,7 @@ async def ctp_apply(chat, sym, tp, sl, force=False):
                     f"{dot(pnl)} {pnl:+.2f}")
         tpp, slp = lvl(e, sd, tp), lvl(e, sd, -sl)
         ok, err = await set_tpsl_one(c, p, tp=tpp, sl=slp)
-        return f"{'✅' if ok else '❌'} {c.name}: TP {num(tpp)} (+{tp:g}%) · SL {num(slp)} ({-sl:+g}%)" + ("" if ok else f" — {err[:60]}")
+        return f"{'✅' if ok else '❌'} {c.name}: TP {num(tpp)} (+{tp:g}%) · SL {num(slp)} ({pct_lbl(-sl)})" + ("" if ok else f" — {err[:60]}")
     busy["n"] += 1
     try:
         lines = await asyncio.gather(*(one(c, p) for c, p in acc_positions(sym)))
@@ -1482,7 +1490,7 @@ async def ctp_apply(chat, sym, tp, sl, force=False):
     track_new("ctp", chat)                     # xoa tin hoi
     live.update(png_sym=None)
     live_refresh_now()
-    head = f"✏️ Custom TP-SL — {coin_of(sym)}: TP +{tp:g}% · SL {-sl:+g}% (từ entry từng acc)"
+    head = f"✏️ Custom TP-SL — {coin_of(sym)}: TP +{tp:g}% · SL {pct_lbl(-sl)} (từ entry từng acc)"
     log(head)
     send(chat, head + "\n" + "\n".join(lines))
 

@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.28.1"
+VERSION = "1.28.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.28.2", ["Nút dưới /status gọn hơn: mỗi nút chính 1 dòng; mở nút nào chỉ hiện nút phụ của nút đó, ẩn các nút khác (bấm ▾ để quay lại)"]),
     ("1.28.1", ["/status luôn ghi dòng 📋 Template cho từng coin (chưa áp dụng / TP v1 / TP v2 / Part-TP v1 đang ở mốc nào), ở mọi kiểu hiển thị"]),
     ("1.28.0", ["Nút mới dưới /status: Order Template → 🧑🏻‍🤝‍🧑🏻TP v1 / 🧑🏻‍🤝‍🧑🏻TP v2 / Part-TP v1 (TP / SL riêng từng acc, tính từ entry của từng acc)",
                 "TP v2: SL lời chưa đặt được thì tạm để −2%, tool tự dời lên khi giá vượt qua; Part-TP v1: tool tự chốt dần ở +3/5/7/10/15% và dời SL",
@@ -2012,11 +2013,15 @@ def live_kb():
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
         G = status_groups()
         rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
-    rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
-             {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}],
-             [{"text": mark(menu == "tpl", "Order Template"), "callback_data": "m:tpl"}]]
+    MAIN = [("close", "Close Order"), ("tpsl", "Edit TP & SL"), ("tpl", "Order Template")]
+    top = "tpsl" if menu in ("tp", "sl") else menu
+    if not top:                                       # dang dong: moi nut chinh 1 dong
+        rows += [[{"text": t, "callback_data": f"m:{k}"}] for k, t in MAIN]
+        return {"inline_keyboard": rows}
+    # dang mo 1 nut chinh: chi hien nut do (▾) + cac nut phu cua no, an cac nut chinh khac
+    rows.append([{"text": "▾ " + dict(MAIN)[top], "callback_data": f"m:{top}"}])
     pos = pos_list()
-    if menu and len(pos) > 1:                         # nhieu coin: chon position truoc (moi coin 1 dong)
+    if len(pos) > 1:                                  # nhieu coin: chon position truoc (moi coin 1 dong)
         sel = sel_sym()
         if not sel:
             for sym, sd, pnl in pos:
@@ -2024,20 +2029,21 @@ def live_kb():
             return {"inline_keyboard": rows}
         sd = next((x[1] for x in pos if x[0] == sel), "Buy")
         rows.append([{"text": f"▾ {side_vn(sd)} {coin_of(sel)}  (bấm để chọn coin khác)", "callback_data": "ps:"}])
-    if menu == "close":
+    if top == "close":
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
         rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
-    elif menu == "tpl":
+    elif top == "tpl":
         for k, (label, _) in TEMPLATES.items():
             rows.append([{"text": label, "callback_data": f"tpl:{k}"}])
         if any(pl.get("sym") == sel_sym() for pl in (cfg.get("plans") or {}).values()):
             rows.append([{"text": "✖ Huỷ template đang chạy", "callback_data": "tpl:x"}])
-    elif menu in ("tpsl", "tp", "sl"):
-        rows.append([{"text": mark(menu == "tp", "Edit TP"), "callback_data": "m:tp"},
-                     {"text": mark(menu == "sl", "Edit SL"), "callback_data": "m:sl"}])
-        if menu in ("tp", "sl"):
-            rows.append([{"text": f"{p}%", "callback_data": f"{menu}:{p}"} for p in TPSL_PCTS])
-            rows.append([{"text": f"Remove {menu.upper()}", "callback_data": f"{menu}:0"}])     # 0 = go TP/SL
+    elif menu == "tpsl":                              # chua chon TP hay SL
+        rows.append([{"text": "Edit TP", "callback_data": "m:tp"}])
+        rows.append([{"text": "Edit SL", "callback_data": "m:sl"}])
+    else:                                             # dang mo Edit TP hoac Edit SL: an nut con lai
+        rows.append([{"text": "▾ Edit " + menu.upper(), "callback_data": f"m:{menu}"}])
+        rows.append([{"text": f"{p}%", "callback_data": f"{menu}:{p}"} for p in TPSL_PCTS])
+        rows.append([{"text": f"Remove {menu.upper()}", "callback_data": f"{menu}:0"}])     # 0 = go TP/SL
     return {"inline_keyboard": rows}
 
 

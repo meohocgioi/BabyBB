@@ -4,10 +4,14 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.30.1"
+VERSION = "1.31.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.31.0", ["Nút mới dưới /status: Trailing Stop (ngay dưới Close Order) — giống Binance: Callback Rate · Size · Activation Price",
+                "Bấm nhanh 1% / 2% / 3% / 5% / 10%: đặt Trailing toàn bộ position trên sàn Bybit (chạy cả khi tắt máy)",
+                "✏️ Custom Trailing: gõ 3 (toàn bộ) · 3 20 (chỉ 20 USDT, tool tự theo dõi) · 3 all 4.10 (chờ giá chạm 4.10 mới bám)",
+                "/status ghi Trailing đang chạy (đỉnh, mức sẽ chốt); nút Remove Trailing để gỡ"]),
     ("1.30.1", ["Gõ /status (hoặc bảng /status tự gửi) thì tin hỏi Custom TP-SL, Close Custom Size, cảnh báo và bảng Order Template đang treo tự bị xoá, ô nhập cũng huỷ luôn"]),
     ("1.30.0", ["Edit TP & SL → ✏️ Enter custom TP-SL: gõ \"TP SL\" (vd 10 5 = TP +10%, SL −5% từ entry từng acc), đặt luôn không hỏi",
                 "Nếu TP / SL đó làm lệnh khớp ngay: bot cảnh báo, gợi ý mức TP / SL an toàn, hỏi Tiếp tục / Cancel"]),
@@ -391,7 +395,8 @@ class Bybit:
                         "pct": (pnl / value * 100) if value else 0,
                         "lev": p.get("leverage"), "idx": int(p.get("positionIdx") or 0),
                         "fee": max(0.0, -float(p.get("curRealisedPnl") or 0)),
-                        "tp": p.get("takeProfit"), "sl": p.get("stopLoss")})
+                        "tp": p.get("takeProfit"), "sl": p.get("stopLoss"),
+                        "ts": p.get("trailingStop"), "act": p.get("activePrice")})
         return out
 
 
@@ -976,7 +981,7 @@ def template_info_blocks():
 
 def tpl_kb(sym):
     rows = [[{"text": label, "callback_data": f"tpl:{k}"}] for k, (label, _) in TEMPLATES.items()]
-    if any(pl.get("sym") == sym for pl in (cfg.get("plans") or {}).values()):
+    if any(pl.get("sym") == sym and pl.get("type") != "trail" for pl in (cfg.get("plans") or {}).values()):
         rows.append([{"text": "✖ Huỷ template đang chạy", "callback_data": "tpl:x"}])
     rows.append([{"text": "⬅️ Đóng", "callback_data": "tplclose"}])
     return {"inline_keyboard": rows}
@@ -1027,7 +1032,7 @@ def template_hits(k, sym):
 
 async def apply_template(k, sym):
     plans = cfg.setdefault("plans", {})
-    for key in [x for x, pl in plans.items() if pl.get("sym") == sym]:
+    for key in [x for x, pl in plans.items() if pl.get("sym") == sym and pl.get("type") != "trail"]:
         plans.pop(key)                         # template moi thay template cu cua coin nay
     pos = acc_positions(sym)
     if not pos:
@@ -1086,7 +1091,7 @@ async def apply_template(k, sym):
 
 async def cancel_plans(sym):
     plans = cfg.setdefault("plans", {})
-    gone = [x for x, pl in plans.items() if pl.get("sym") == sym]
+    gone = [x for x, pl in plans.items() if pl.get("sym") == sym and pl.get("type") != "trail"]
     for x in gone:
         plans.pop(x)
     (cfg.get("tpl_applied") or {}).pop(sym, None)
@@ -1096,7 +1101,7 @@ async def cancel_plans(sym):
 
 def plan_note(sym):
     """1 dong tren /status: template dang ap dung cho coin nay."""
-    pl = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym]
+    pl = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym and x.get("type") != "trail"]
     applied = (cfg.get("tpl_applied") or {}).get(sym)
     if not pl:
         return f"📋 Template: {TEMPLATES[applied][0]} (đã đặt TP / SL)" if applied in TEMPLATES else "📋 Template: chưa áp dụng"
@@ -1112,6 +1117,16 @@ def plan_note(sym):
 async def plan_step(key, pl, c, p, px):
     """Thuc hien 1 buoc cua template cho 1 acc. -> (khoa nhom tin bao, dong bao, xoa template?)"""
     e, sd = pl["entry"], pl["side"]
+    if pl["type"] == "trail":
+        q = min(D(str(pl["qty"])), D(str(p["size"])))
+        rows = await close_one(c, plan={pl["sym"]: q})
+        add_realized(rows)
+        okc = rows and all(x.get("ok") for x in rows)
+        pnl = sum(x.get("pnl", 0) for x in rows)
+        await refresh_one(c)
+        return (("trail", pl["sym"], pl["rate"], pl["peak"]),
+                f"{c.name}: " + (f"chốt {fmt(q)} (~{float(q) * px:.2f} USDT) giá {num(px)} {dot(pnl)} {pnl:+.2f}" if okc
+                                 else f"❌ chốt lỗi: {rows[0].get('err') if rows else '?'}"), True)
     if pl["type"] == "slwait":
         ok, err = await set_tpsl_one(c, p, sl=pl["sl"])
         return (("sl", pl["sym"]), f"{'✅' if ok else '❌'} {c.name}: SL → {num(pl['sl'])} ({pct_lbl(pl['sl_pct'])})"
@@ -1173,6 +1188,8 @@ async def plan_loop():
                 gain = (px / pl["entry"] - 1) * 100 * (1 if pl["side"] == "Buy" else -1)
                 if pl["type"] == "slwait":
                     hit = sl_valid(pl["side"], pl["sl"], px)
+                elif pl["type"] == "trail":
+                    hit = trail_tick(pl, px)
                 else:
                     hit = pl["step"] < len(PTP_STEPS) and gain >= PTP_STEPS[pl["step"]][0]
                 if hit:
@@ -1195,6 +1212,8 @@ async def plan_loop():
                 changed = True
                 for k, lines in events.items():
                     head = (f"📋 TP v2 — {coin_of(k[1])}: giá đã vượt mức, dời SL lời" if k[0] == "sl"
+                            else f"🧵 Trailing Stop {k[2]:g}% — {coin_of(k[1])}: giá hồi {k[2]:g}% từ đỉnh {num(k[3])}, đã chốt"
+                            if k[0] == "trail"
                             else f"🎯 Part-TP v1 — {coin_of(k[1])} +{k[2]:g}%: chốt {k[3]}% phần còn lại")
                     log(head)
                     send(cfg["bot_owner_id"], head + "\n" + "\n".join(sorted(lines)))
@@ -1203,6 +1222,166 @@ async def plan_loop():
                 live_refresh_now()
         except Exception as e:
             log(f"Order Template: {type(e).__name__}: {str(e)[:120]}")
+
+
+# ===== Trailing Stop (giong Binance: Callback Rate · Size · Activation Price) =====
+TRAIL_PCTS = (1, 2, 3, 5, 10)
+
+
+def trail_tick(pl, px):
+    """Cap nhat dinh / kich hoat cho 1 Trailing Stop cua bot. -> True neu gia da hoi du callback (phai chot)."""
+    up = pl["side"] == "Buy"
+    if not pl.get("on"):
+        if pl.get("act") and not (px >= pl["act"] if up else px <= pl["act"]):
+            return False
+        pl["on"], pl["peak"] = True, px
+        log(f"🧵 Trailing Stop {coin_of(pl['sym'])} {pl['acc']}: đã kích hoạt ở giá {num(px)}")
+    if (px > pl["peak"]) if up else (px < pl["peak"]):
+        pl["peak"] = px
+    stop = pl["peak"] * (1 - pl["rate"] / 100) if up else pl["peak"] * (1 + pl["rate"] / 100)
+    return px <= stop if up else px >= stop
+
+
+def trail_parse(txt):
+    """'3' / '3 200' / '3 200 4.10' / '3 all 4.10' -> (callback %, size USDT hoac None = toan bo, gia kich hoat hoac None)"""
+    t = (txt or "").replace(",", ".").replace("/", " ").upper().replace("USDT", " ").split()
+    if not 1 <= len(t) <= 3:
+        return None
+    try:
+        rate = float(t[0].rstrip("%"))
+        size = None if len(t) < 2 or t[1] in ("ALL", "MAX", "-", "100%", "0") else float(t[1])
+        act = float(t[2]) if len(t) == 3 and t[2] not in ("-", "0") else None
+    except ValueError:
+        return None
+    if not 0.1 <= rate <= 30 or (size is not None and size <= 0) or (act is not None and act <= 0):
+        return None
+    return rate, size, act
+
+
+def trail_note(sym):
+    """Dong Trailing Stop tren /status (tren san + bot tu theo doi) hoac None."""
+    out = []
+    nat = [(c, p) for c, p in acc_positions(sym) if float(p.get("ts") or 0) > 0]
+    if nat:
+        px = cur_price({"symbol": sym, "entry": nat[0][1]["avg"]})
+        dist = float(nat[0][1]["ts"])
+        act = float(nat[0][1].get("act") or 0)
+        out.append(f"🧵 Trailing (sàn) {len(nat)} acc · hồi ~{dist / px * 100:.2f}% (cách {num(dist)})"
+                   + (f" · kích hoạt {num(act)}" if act else ""))
+    bot = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym and x.get("type") == "trail"]
+    if bot:
+        b = bot[0]
+        usd = sum(float(x["qty"]) for x in bot) * cur_price({"symbol": sym, "entry": b["entry"]})
+        up = b["side"] == "Buy"
+        if b.get("on"):
+            stop = b["peak"] * (1 - b["rate"] / 100) if up else b["peak"] * (1 + b["rate"] / 100)
+            st = f"đỉnh {num(b['peak'])} → chốt khi {'≤' if up else '≥'} {num(stop)}"
+        else:
+            st = f"chờ giá chạm {num(b['act'])}"
+        out.append(f"🧵 Trailing {b['rate']:g}% · ~{usd:.2f} USDT ({len(bot)} acc, tool theo dõi) · {st}")
+    return "\n".join(out) or None
+
+
+def trail_has(sym):
+    return bool(trail_note(sym))
+
+
+async def trail_native(c, p, rate, act, px):
+    """Dat Trailing Stop tren san Bybit cho TOAN BO position 1 acc. rate = 0 -> go. -> (ok, loi, khoang cach)"""
+    ins = instruments.get(p["symbol"])
+    if not ins:
+        await load_instruments(p["symbol"])
+        ins = instruments.get(p["symbol"])
+    body = {"category": "linear", "symbol": p["symbol"], "tpslMode": "Full", "positionIdx": p["idx"]}
+    dist = D(0)
+    if rate:
+        dist = max(round_tick(D(str((act or px) * rate / 100)), ins["tick"]), ins["tick"])
+        body["trailingStop"] = fmt(dist)
+        if act:
+            body["activePrice"] = fmt(round_tick(D(str(act)), ins["tick"]))
+    else:
+        body["trailingStop"] = "0"
+    r = await c.req("POST", "/v5/position/trading-stop", body)
+    return r.get("retCode") in (0, 34040), str(r.get("retMsg")), dist
+
+
+async def trail_ask(chat, sym, warn=None):
+    info = cc_info(sym)
+    if not info:
+        return send(chat, "Không có position nào đang mở.")
+    text = ((("⚠️ " + warn + "\n") if warn else "") +
+            f"🧵 Trailing Stop — {side_vn(info['side'])} {coin_of(sym)} · giá {num(info['price'])} · Total {info['total']:.2f} USDT\n"
+            "Gõ: Callback%  [Size USDT]  [Activation Price]\n"
+            "• 3 → giá hồi 3% từ đỉnh thì đóng toàn bộ\n"
+            "• 3 20 → chỉ đóng 20 USDT (chia đều các acc)\n"
+            f"• 3 all {num(lvl(info['price'], info['side'], 5))} → toàn bộ, chỉ bắt đầu bám khi giá chạm mức này\n"
+            "Toàn bộ size: đặt thẳng trên sàn (chạy cả khi tắt máy). Một phần size: tool tự theo dõi (máy phải bật).")
+    rm, _ = await _send(chat, text, {"force_reply": True, "input_field_placeholder": "Callback% [Size] [Activation]  (vd: 3)"})
+    live["ctr"] = {"t": time.time(), "sym": sym}
+    track_new("ctr", chat, rm)
+
+
+async def trail_apply(chat, sym, rate, size=None, act=None):
+    """Dat Trailing Stop cho coin sym tren moi acc. size None / >= tong -> tren san; nho hon -> tool tu theo doi."""
+    info = cc_info(sym)
+    if not info:
+        live.pop("ctr", None)
+        return send(chat, "Không có position nào đang mở.")
+    if size is not None and size > info["total"] * 1.001 + 0.01:
+        return await trail_ask(chat, sym, f"{size:g} USDT lớn hơn tổng position ({info['total']:.2f} USDT). Nhập lại.")
+    if size is not None and size < info["total"] * 0.995 and size < info["min"]:
+        return await trail_ask(chat, sym, f"{size:g} USDT quá nhỏ: tối thiểu {info['min']:.2f} USDT (mức tối thiểu của sàn cho mỗi acc).")
+    live.pop("ctr", None)
+    px, up = info["price"], info["side"] == "Buy"
+    note = ""
+    if act and (act <= px if up else act >= px):
+        note = f"\n(Giá kích hoạt {num(act)} đã bị vượt qua — bám ngay từ giá hiện tại)"
+        act = None
+    plans = cfg.setdefault("plans", {})
+    for k in [k for k, pl in plans.items() if pl.get("sym") == sym and pl.get("type") == "trail"]:
+        plans.pop(k)                           # Trailing moi thay Trailing cu (cua bot) cho coin nay
+    head = f"🧵 Trailing Stop {rate:g}% — {side_vn(info['side'])} {coin_of(sym)}" + (f" · kích hoạt {num(act)}" if act else "")
+    if size is None or size >= info["total"] * 0.995:
+        busy["n"] += 1
+        try:
+            res = await asyncio.gather(*(trail_native(c, p, rate, act, px) for c, p in acc_positions(sym)))
+        finally:
+            busy["n"] -= 1
+        lines = [f"{'✅' if ok else '❌'} {c.name}: " + (f"hồi {num(dist)} (~{rate:g}%) là đóng toàn bộ" if ok else err[:80])
+                 for (c, _), (ok, err, dist) in zip(acc_positions(sym), res)]
+        msg = head + " · toàn bộ size (đặt trên sàn)\n" + "\n".join(lines)
+    else:
+        plan = cc_plan(info, size)
+        for c, p in acc_positions(sym):
+            if c.name in plan:
+                plans[f"trail:{c.name}:{sym}"] = {"type": "trail", "acc": c.name, "sym": sym, "side": p["side"],
+                                                  "entry": p["avg"], "rate": rate, "qty": fmt(plan[c.name]),
+                                                  "act": act, "on": False, "peak": None}
+        for x in plans.values():               # khong co gia kich hoat -> bam ngay tu gia hien tai
+            if x.get("type") == "trail" and x["sym"] == sym and not x["act"]:
+                x["on"], x["peak"] = True, px
+        msg = (head + f" · ~{sum(float(v) for v in plan.values()) * px:.2f} USDT ({len(plan)} acc)\n"
+               + "\n".join(f"✅ {k}: {fmt(v)} (~{float(v) * px:.2f} USDT)" for k, v in plan.items())
+               + "\nTool tự theo dõi giá mỗi giây — để tool chạy liên tục.")
+    save_cfg()
+    log(msg.split("\n")[0])
+    track_new("ctr", chat)                     # xoa tin hoi
+    live.update(menu=None)
+    live_refresh_now()
+    send(chat, msg + note)
+
+
+async def trail_remove(sym):
+    plans = cfg.setdefault("plans", {})
+    gone = [k for k, pl in plans.items() if pl.get("sym") == sym and pl.get("type") == "trail"]
+    for k in gone:
+        plans.pop(k)
+    save_cfg()
+    nat = [(c, p) for c, p in acc_positions(sym) if float(p.get("ts") or 0) > 0]
+    res = await asyncio.gather(*(trail_native(c, p, 0, None, 0) for c, p in nat))
+    lines = [f"{'✅' if ok else '❌'} {c.name}: " + ("đã gỡ" if ok else err[:80]) for (c, _), (ok, err, _) in zip(nat, res)]
+    return (f"🧹 Đã gỡ Trailing Stop {coin_of(sym)}" + (f" (tool: {len(gone)} acc)" if gone else "")
+            + ("\n" + "\n".join(lines) if lines else ""))
 
 
 # ===== Enter custom TP-SL: go "TP SL" (% tu entry tung acc) =====
@@ -1275,7 +1454,7 @@ async def ctp_apply(chat, sym, tp, sl, force=False):
         return
     live.pop("ctp", None)
     (cfg.get("tpl_applied") or {}).pop(sym, None)              # sua tay -> template cu khong con dung
-    for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == sym]:
+    for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == sym and pl.get("type") != "trail"]:
         cfg["plans"].pop(x)
     save_cfg()
     lines = []
@@ -1774,6 +1953,9 @@ def status_blocks(title=None, stamp=None, photos=None):
         elif photos and photos.get(sym):
             blocks.append({"type": "photo", "photo": {"type": "photo", "media": photos[sym]}})
         blocks.append(r_par(plan_note(sym)))               # template dang chay cua coin nay
+        tn = trail_note(sym)
+        if tn:
+            blocks.append(r_par(tn))
         levs = sorted({float(x) for x in g["lev"]})
         lv = f"x{levs[0]:g}" if len(levs) == 1 else f"x{levs[0]:g}–{levs[-1]:g}"
         pct = g["pnl"] / g["val"] * 100 if g["val"] else 0.0
@@ -2208,7 +2390,7 @@ def live_kb():
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
         G = status_groups()
         rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
-    MAIN = [("close", "Close Order"), ("tpsl", "Edit TP & SL"), ("tpl", "Order Template")]
+    MAIN = [("close", "Close Order"), ("trail", "Trailing Stop"), ("tpsl", "Edit TP & SL"), ("tpl", "Order Template")]
     top = "tpsl" if menu in ("tp", "sl") else menu
     if not top:                                       # dang dong: moi nut chinh 1 dong
         rows += [[{"text": t, "callback_data": f"m:{k}"}] for k, t in MAIN]
@@ -2229,6 +2411,11 @@ def live_kb():
         rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
     elif top == "tpl":
         rows.append([{"text": "👇 chọn template ở bảng bên dưới", "callback_data": "noop"}])
+    elif top == "trail":
+        rows.append([{"text": "✏️ Custom Trailing (Callback · Size · Activation)", "callback_data": "ctr"}])
+        rows.append([{"text": f"{p}%", "callback_data": f"tr:{p}"} for p in TRAIL_PCTS])
+        if trail_has(sel_sym() or pos[0][0]):
+            rows.append([{"text": "Remove Trailing", "callback_data": "tr:0"}])
     elif menu == "tpsl":                              # chua chon TP hay SL
         rows.append([{"text": "✏️ Enter custom TP-SL", "callback_data": "ctp"}])
         rows.append([{"text": "Edit TP", "callback_data": "m:tp"}])
@@ -2261,7 +2448,7 @@ def sel_sym():
 async def set_tpsl_all(kind, pct, only=None):
     if only:                                   # sua TP / SL tay -> template cu khong con dung
         (cfg.get("tpl_applied") or {}).pop(only, None)
-        for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == only]:
+        for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == only and pl.get("type") != "trail"]:
             cfg["plans"].pop(x)
         save_cfg()
     return await _set_tpsl_all(kind, pct, only)
@@ -2574,20 +2761,45 @@ async def handle_callback(cq):
         return await kb_answer(answer)
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
-        if want not in ("close", "tpsl", "tp", "sl", "tpl"):
+        if want not in ("close", "tpsl", "tp", "sl", "tpl", "trail"):
             return await answer()
         if want == "tpsl":
             live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
-        elif want in ("close", "tpl"):
+        elif want in ("close", "tpl", "trail"):
             live["menu"] = None if cur == want else want
         else:                                  # Edit TP / Edit SL trong menu Edit TP & SL
             live["menu"] = "tpsl" if cur == want else want
-        if want in ("close", "tpsl", "tpl") and live["menu"] == want:
+        if want in ("close", "tpsl", "tpl", "trail") and live["menu"] == want:
             live["sel"] = None                 # mo menu moi -> chon lai position
         if (live["menu"] == "tpl") != (cur == "tpl"):      # mo / dong Order Template -> hien / xoa bang mo ta
             asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
         live["confirm"] = None
         return await kb_answer(answer)
+    if data == "ctr" or data.startswith("tr:"):   # Trailing Stop
+        sym = sel_sym()
+        if not sym:
+            return await answer("Chọn position trước", True)
+        chat = live["chat"] or cfg["bot_owner_id"]
+        if data == "ctr":
+            live["menu"] = None
+            asyncio.create_task(kb_answer(answer))
+            return await trail_ask(chat, sym)
+        try:
+            rate = int(data[3:])
+        except ValueError:
+            return await answer()
+        if rate and rate not in TRAIL_PCTS:
+            return await answer()
+        if not rate:
+            asyncio.create_task(answer("Đang gỡ Trailing Stop…"))
+            log(f"🧹 Gỡ Trailing Stop {sym} (nút dưới /status)")
+            msg = await trail_remove(sym)
+            live["menu"] = None
+            live_refresh_now()
+            send(chat, msg)
+            return
+        asyncio.create_task(answer(f"Đang đặt Trailing Stop {rate}%…"))
+        return await trail_apply(chat, sym, rate)
     if data == "ctp":                          # Edit TP & SL -> Enter custom TP-SL
         sym = sel_sym()
         if not sym:
@@ -2713,9 +2925,9 @@ def track_add(key, chat, *mids):
 
 def clear_prompts(chat):
     """Gui /status moi -> xoa cac tin hoi / canh bao / bang template dang treo va huy o nhap dang cho."""
-    for k in ("ctp", "cc", "ctp_pending", "tpl_pending"):
+    for k in ("ctp", "cc", "ctr", "ctp_pending", "tpl_pending"):
         live.pop(k, None)
-    for g in ("ctp", "ctp_confirm", "cc", "tpl_confirm", "tpl_info"):
+    for g in ("ctp", "ctp_confirm", "cc", "ctr", "tpl_confirm", "tpl_info"):
         if (cfg.get("msg_track") or {}).get(g, {}).get("mids"):
             track_new(g, chat)
 
@@ -3419,7 +3631,7 @@ async def fetch_closed(c, start_ms):
 
 
 _REASON = {"CreateByTakeProfit": "🏁 TP", "CreateByPartialTakeProfit": "🏁 TP", "CreateByTrailingProfit": "🏁 TP",
-           "CreateByStopLoss": "💀 SL", "CreateByPartialStopLoss": "💀 SL", "CreateByTrailingStop": "💀 Trailing SL",
+           "CreateByStopLoss": "💀 SL", "CreateByPartialStopLoss": "💀 SL", "CreateByTrailingStop": "🧵 Trailing Stop",
            "CreateByClosing": "✋ Đóng tay", "CreateByUser": "✋ Đóng tay", "CreateByAdminClosing": "🏛 Sàn đóng",
            "CreateBySettle": "🏛 Sàn đóng"}
 
@@ -3874,9 +4086,20 @@ async def handle_update(u):
             if chat != str(cfg["bot_owner_id"]).strip():
                 send(chat, f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
                 return
+            ctr = live.get("ctr")
+            if ctr and not cmd.startswith("/") and time.time() - ctr["t"] < CTP_TTL and \
+                    all(not live.get(k) or ctr["t"] >= live[k]["t"] for k in ("ctp", "cc")):
+                v = trail_parse(m.get("text"))
+                asyncio.create_task(tg_delete(chat, [m.get("message_id")]))
+                if v:
+                    await trail_apply(chat, ctr["sym"], *v)
+                else:
+                    await trail_ask(chat, ctr["sym"], "Sai định dạng. Vd: 3  ·  3 20  ·  3 all 4.10")
+                return
             ctp = live.get("ctp")
             if ctp and not cmd.startswith("/") and time.time() - ctp["t"] < CTP_TTL and \
-                    (not live.get("cc") or ctp["t"] >= live["cc"]["t"]):
+                    (not live.get("cc") or ctp["t"] >= live["cc"]["t"]) and \
+                    (not live.get("ctr") or ctp["t"] >= live["ctr"]["t"]):
                 v = ctp_parse(m.get("text"))
                 asyncio.create_task(tg_delete(chat, [m.get("message_id")]))
                 if v:

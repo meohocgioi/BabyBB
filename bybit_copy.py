@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.27.2"
+VERSION = "1.28.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.28.0", ["Nút mới dưới /status: Order Template → 🧑🏻‍🤝‍🧑🏻TP v1 / 🧑🏻‍🤝‍🧑🏻TP v2 / Part-TP v1 (TP / SL riêng từng acc, tính từ entry của từng acc)",
+                "TP v2: SL lời chưa đặt được thì tạm để −2%, tool tự dời lên khi giá vượt qua; Part-TP v1: tool tự chốt dần ở +3/5/7/10/15% và dời SL",
+                "/status ghi template đang chạy; sửa lỗi bấm lại Close Order mở nhầm menu Edit TP & SL"]),
     ("1.27.2", ["Bar v3: đổi sang ô █░ chữ đều (monospace) — ô của thanh TP và SL bằng nhau trên mọi điện thoại, không còn xuống dòng"]),
     ("1.27.1", ["/setting dùng nút thường dưới tin, không bị cắt chữ: mỗi mục 1 nút riêng (Hiển thị /status, Auto Refresh), bấm vào mới hiện lựa chọn"]),
     ("1.27.0", ["Bar v3: thanh mảnh 20 ô [ ▰▰▰▱▱… ] cho TP / SL — chi tiết gấp đôi, không bị xuống dòng trên điện thoại",
@@ -172,6 +175,7 @@ DEFAULT_CFG = {
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
     "refresh": 5,
+    "plans": {},                    # Order Template dang chay: {"Acc1:EVAAUSDT": {...}} (nho lai khi khoi dong lai)
     "view": "hb2",                  # kieu hien thi /status: c1 (chart 1m) / hb (Bar v1 anh) / hb2 (Bar v2) / hb3 (Bar v3)                   # giay giua 2 lan tu cap nhat noi dung (/status, Health Bar, chart): 3 / 5 / 10
     "update_url": DEFAULT_UPDATE_URL,
     "running": False,
@@ -896,6 +900,208 @@ async def setting_send(chat, umid=None):
     track_new("setting", chat, mid, umid)
 
 
+# ===== Order Template: dat TP / SL rieng tung acc, chot loi tung phan =====
+SL_BASE = 2.0                                   # SL mac dinh: cach entry 2% (phia lo)
+TP_V1 = [(3, -2), (5, -2), (7, -2), (10, -2), (12, -2)]      # (TP %, SL %) theo thu tu Acc1..Acc5
+TP_V2 = [(3, -2), (5, 0), (7, 2), (10, 5), (12, 7)]          # SL duong = SL loi (dat khi gia da vuot qua)
+PTP_STEPS = [(3, 0.30, -2), (5, 0.30, 0), (7, 0.50, 2), (10, 0.70, 5), (15, 1.00, None)]   # (moc %, chot % size con lai, SL moi %)
+TEMPLATES = {"v1": ("🧑🏻‍🤝‍🧑🏻TP v1", "TP 3/5/7/10/12% · SL −2%"),
+             "v2": ("🧑🏻‍🤝‍🧑🏻TP v2", "TP 3/5/7/10/12% · SL −2/0/+2/+5/+7%"),
+             "p1": ("Part-TP v1", "chốt dần 3·5·7·10·15%")}
+PLAN_LIVE_PAD = 0.002                           # SL loi chi dat khi gia da vuot muc SL them 0.2% (Bybit moi nhan)
+
+
+def lvl(entry, side, pct):
+    """Gia cach entry pct% theo huong co loi (+) / lo (-) cua position."""
+    d = 1 if side == "Buy" else -1
+    return entry * (1 + d * pct / 100)
+
+
+async def set_tpsl_one(c, p, tp=None, sl=None):
+    """Dat TP / SL (gia) cho 1 position cua 1 acc. tp/sl = None: giu nguyen; 0: go bo. -> (ok, loi)"""
+    ins = instruments.get(p["symbol"])
+    if not ins:
+        await load_instruments(p["symbol"])
+        ins = instruments.get(p["symbol"])
+    body = {"category": "linear", "symbol": p["symbol"], "tpslMode": "Full", "positionIdx": p["idx"]}
+    for k, v in (("takeProfit", tp), ("stopLoss", sl)):
+        if v is not None:
+            body[k] = "0" if v == 0 else fmt(round_tick(D(str(v)), ins["tick"]))
+    r = await c.req("POST", "/v5/position/trading-stop", body)
+    return r.get("retCode") in (0, 34040), str(r.get("retMsg"))
+
+
+def acc_positions(sym):
+    """[(client, position)] cua 1 coin tren cac acc, theo thu tu Acc1..AccN."""
+    out = []
+    for c in clients:
+        for p in (status.get(c.name) or {}).get("positions") or []:
+            if p["symbol"] == sym:
+                out.append((c, p))
+    return out
+
+
+def sl_valid(side, sl, price):
+    """Bybit chi nhan SL Long thap hon gia hien tai, SL Short cao hon gia hien tai."""
+    return sl < price * (1 - PLAN_LIVE_PAD) if side == "Buy" else sl > price * (1 + PLAN_LIVE_PAD)
+
+
+async def apply_template(k, sym):
+    plans = cfg.setdefault("plans", {})
+    for key in [x for x, pl in plans.items() if pl.get("sym") == sym]:
+        plans.pop(key)                         # template moi thay template cu cua coin nay
+    pos = acc_positions(sym)
+    if not pos:
+        return "Không có position nào đang mở."
+    price = cur_price({"symbol": sym, "entry": pos[0][1]["avg"]})
+    title, lines = TEMPLATES[k][0], []
+    busy["n"] += 1
+    try:
+        for i, (c, p) in enumerate(pos):
+            e, sd = p["avg"], p["side"]
+            if k in ("v1", "v2"):
+                tp_pct, sl_pct = (TP_V1 if k == "v1" else TP_V2)[min(i, 4)]
+                tp, sl = lvl(e, sd, tp_pct), lvl(e, sd, sl_pct)
+                wait = not sl_valid(sd, sl, price)
+                ok, err = await set_tpsl_one(c, p, tp=tp, sl=lvl(e, sd, -SL_BASE) if wait else sl)
+                if ok and wait:
+                    plans[f"{c.name}:{sym}"] = {"type": "slwait", "acc": c.name, "sym": sym, "side": sd,
+                                                "entry": e, "sl": sl, "sl_pct": sl_pct}
+                lines.append(f"{'✅' if ok else '❌'} {c.name}: TP {num(tp)} ({tp_pct:+g}%) · SL " +
+                             (f"{num(lvl(e, sd, -SL_BASE))} (−{SL_BASE:g}%), tự dời lên {num(sl)} ({pct_lbl(sl_pct)}) khi giá vượt qua"
+                              if wait else f"{num(sl)} ({pct_lbl(sl_pct)})") + ("" if ok else f" — {err[:60]}"))
+            else:                              # Part-TP v1: go TP tren san, SL −2%, tool tu chot theo moc
+                ok, err = await set_tpsl_one(c, p, tp=0, sl=lvl(e, sd, -SL_BASE))
+                if ok:
+                    plans[f"{c.name}:{sym}"] = {"type": "ptp", "acc": c.name, "sym": sym, "side": sd,
+                                                "entry": e, "step": 0}
+                lines.append(f"{'✅' if ok else '❌'} {c.name}: entry {num(e)} · SL {num(lvl(e, sd, -SL_BASE))} (−{SL_BASE:g}%) · đã gỡ TP"
+                             + ("" if ok else f" — {err[:60]}"))
+    finally:
+        busy["n"] -= 1
+    save_cfg()
+    live.update(png_sym=None)
+    head = f"📋 {title} — {coin_of(sym)}"
+    if k == "p1":
+        head += "\nTool tự chốt: " + " → ".join(f"+{t:g}%: {int(f * 100)}%" for t, f, _ in PTP_STEPS) + " (của phần còn lại)"
+    log(head.replace("\n", " | "))
+    return head + "\n" + "\n".join(lines)
+
+
+async def cancel_plans(sym):
+    plans = cfg.setdefault("plans", {})
+    gone = [x for x, pl in plans.items() if pl.get("sym") == sym]
+    for x in gone:
+        plans.pop(x)
+    save_cfg()
+    return f"✖ Đã huỷ template của {coin_of(sym)} ({len(gone)} acc). TP / SL đang đặt trên sàn giữ nguyên."
+
+
+def plan_note(sym):
+    """1 dong tren /status: template dang chay cua coin nay."""
+    pl = [x for x in (cfg.get("plans") or {}).values() if x.get("sym") == sym]
+    if not pl:
+        return ""
+    ptp = [x for x in pl if x["type"] == "ptp"]
+    if ptp:
+        st = min(x["step"] for x in ptp)
+        nxt = f" · mốc tiếp +{PTP_STEPS[st][0]:g}%" if st < len(PTP_STEPS) else ""
+        return f"📋 Part-TP v1: đã qua {st}/{len(PTP_STEPS)} mốc{nxt}"
+    w = [x["acc"] for x in pl if x["type"] == "slwait"]
+    return f"📋 Chờ dời SL lời: {', '.join(w)}" if w else ""
+
+
+async def plan_step(key, pl, c, p, px):
+    """Thuc hien 1 buoc cua template cho 1 acc. -> (khoa nhom tin bao, dong bao, xoa template?)"""
+    e, sd = pl["entry"], pl["side"]
+    if pl["type"] == "slwait":
+        ok, err = await set_tpsl_one(c, p, sl=pl["sl"])
+        return (("sl", pl["sym"]), f"{'✅' if ok else '❌'} {c.name}: SL → {num(pl['sl'])} ({pct_lbl(pl['sl_pct'])})"
+                + ("" if ok else f" — {err[:60]}"), ok)
+    st = pl["step"]
+    trig, frac, new_sl = PTP_STEPS[st]
+    ins = instruments.get(pl["sym"])
+    size = D(str(p["size"]))
+    q = size if frac >= 1 else floor_step(size * D(str(frac)), ins["step"])
+    line = f"{c.name}: "
+    if q >= ins["min"] or q == size:
+        rows = await close_one(c, plan={pl["sym"]: q})
+        add_realized(rows)
+        okc = rows and all(x.get("ok") for x in rows)
+        pnl = sum(x.get("pnl", 0) for x in rows)
+        line += (f"chốt {fmt(q)} (~{float(q) * px:.2f} USDT) {dot(pnl)} {pnl:+.2f}" if okc
+                 else f"❌ chốt lỗi: {rows[0].get('err') if rows else '?'}")
+    else:
+        line += "phần chốt nhỏ hơn mức tối thiểu của sàn — bỏ qua"
+    if new_sl is not None and q < size:
+        ok, err = await set_tpsl_one(c, p, sl=lvl(e, sd, new_sl))
+        line += f" · SL → {num(lvl(e, sd, new_sl))} ({pct_lbl(new_sl)})" + ("" if ok else f" ❌ {err[:50]}")
+    await refresh_one(c)                       # cap nhat size con lai ngay, tranh chot tiep theo so lieu cu
+    pl["step"] = st + 1
+    return (("ptp", pl["sym"], trig, int(frac * 100)), line, pl["step"] >= len(PTP_STEPS) or q == size)
+
+
+def pct_lbl(x):
+    return "= entry" if x == 0 else f"{x:+g}%"
+
+
+async def plan_loop():
+    """Theo doi gia moi giay: dat SL loi khi gia vuot qua (TP v2), chot loi tung phan (Part-TP v1).
+    Cac acc duoc xu ly CUNG LUC de khong cham."""
+    while True:
+        await asyncio.sleep(1)
+        plans = cfg.get("plans") or {}
+        if not plans or busy["n"]:
+            continue
+        try:
+            todo, changed = [], False
+            px_ok = time.time() - prices["t"] <= PRICE_MAX_AGE
+            for key, pl in list(plans.items()):
+                c = next((x for x in clients if x.name == pl["acc"]), None)
+                p = next((x for x in (status.get(pl["acc"]) or {}).get("positions") or []
+                          if x["symbol"] == pl["sym"] and x["side"] == pl["side"]), None)
+                if not c or not p:             # position da dong / acc khong con -> bo template
+                    if not (status.get(pl["acc"]) or {}).get("error"):
+                        plans.pop(key); changed = True
+                    continue
+                px = prices["map"].get(pl["sym"]) if px_ok else None
+                if not px:
+                    continue
+                gain = (px / pl["entry"] - 1) * 100 * (1 if pl["side"] == "Buy" else -1)
+                if pl["type"] == "slwait":
+                    hit = sl_valid(pl["side"], pl["sl"], px)
+                else:
+                    hit = pl["step"] < len(PTP_STEPS) and gain >= PTP_STEPS[pl["step"]][0]
+                if hit:
+                    todo.append((key, pl, c, p, px))
+            if todo:
+                busy["n"] += 1
+                try:
+                    res = await asyncio.gather(*(plan_step(*t) for t in todo), return_exceptions=True)
+                finally:
+                    busy["n"] -= 1
+                events = {}
+                for (key, pl, c, p, px), r in zip(todo, res):
+                    if isinstance(r, Exception):
+                        log(f"Order Template {c.name}: {type(r).__name__}: {str(r)[:100]}")
+                        continue
+                    ek, line, done = r
+                    events.setdefault(ek, []).append(line)
+                    if done:
+                        plans.pop(key, None)
+                changed = True
+                for k, lines in events.items():
+                    head = (f"📋 TP v2 — {coin_of(k[1])}: giá đã vượt mức, dời SL lời" if k[0] == "sl"
+                            else f"🎯 Part-TP v1 — {coin_of(k[1])} +{k[2]:g}%: chốt {k[3]}% phần còn lại")
+                    log(head)
+                    send(cfg["bot_owner_id"], head + "\n" + "\n".join(sorted(lines)))
+            if changed:
+                save_cfg()
+                live_refresh_now()
+        except Exception as e:
+            log(f"Order Template: {type(e).__name__}: {str(e)[:120]}")
+
+
 def short_margin(r):
     """Bybit tu choi vi khong du ky quy / so du."""
     m = str(r.get("retMsg", "")).lower()
@@ -1460,6 +1666,9 @@ def hb_parts(g, tg, sd, style="hb2"):
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
         parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
                   "\n"] + (lambda b: b if isinstance(b, list) else [b])(hb_bar(frac, key == "tp", style))
+    note = plan_note(tg["symbol"]) if tg else ""
+    if note:
+        parts.append("\n" + note)
     return parts
 
 
@@ -1797,7 +2006,8 @@ def live_kb():
         G = status_groups()
         rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
     rows += [[{"text": mark(menu == "close", "Close Order"), "callback_data": "m:close"},
-             {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}]]
+             {"text": mark(menu in ("tpsl", "tp", "sl"), "Edit TP & SL"), "callback_data": "m:tpsl"}],
+             [{"text": mark(menu == "tpl", "Order Template"), "callback_data": "m:tpl"}]]
     pos = pos_list()
     if menu and len(pos) > 1:                         # nhieu coin: chon position truoc (moi coin 1 dong)
         sel = sel_sym()
@@ -1810,6 +2020,11 @@ def live_kb():
     if menu == "close":
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
         rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
+    elif menu == "tpl":
+        for k, (label, _) in TEMPLATES.items():
+            rows.append([{"text": label, "callback_data": f"tpl:{k}"}])
+        if any(pl.get("sym") == sel_sym() for pl in (cfg.get("plans") or {}).values()):
+            rows.append([{"text": "✖ Huỷ template đang chạy", "callback_data": "tpl:x"}])
     elif menu in ("tpsl", "tp", "sl"):
         rows.append([{"text": mark(menu == "tp", "Edit TP"), "callback_data": "m:tp"},
                      {"text": mark(menu == "sl", "Edit SL"), "callback_data": "m:sl"}])
@@ -2069,19 +2284,33 @@ async def handle_callback(cq):
         return await kb_now()
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
-        if want not in ("close", "tpsl", "tp", "sl"):
+        if want not in ("close", "tpsl", "tp", "sl", "tpl"):
             return await answer()
         if want == "tpsl":
             live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
-        elif want == "close":
-            live["menu"] = None if cur == "close" else "close"
-        if want in ("close", "tpsl") and live["menu"] in ("close", "tpsl"):
-            live["sel"] = None                 # mo menu moi -> chon lai position
-        else:
+        elif want in ("close", "tpl"):
+            live["menu"] = None if cur == want else want
+        else:                                  # Edit TP / Edit SL trong menu Edit TP & SL
             live["menu"] = "tpsl" if cur == want else want
+        if want in ("close", "tpsl", "tpl") and live["menu"] == want:
+            live["sel"] = None                 # mo menu moi -> chon lai position
         live["confirm"] = None
         asyncio.create_task(answer())
         return await kb_now()
+    if data.startswith("tpl:"):                # Order Template
+        k = data[4:]
+        sym = sel_sym()
+        if not sym:
+            return await answer("Chọn position trước", True)
+        if k != "x" and k not in TEMPLATES:
+            return await answer()
+        asyncio.create_task(answer("Đang áp dụng…" if k != "x" else "Đang huỷ…"))
+        live["menu"] = None
+        asyncio.create_task(kb_now())
+        msg = await (cancel_plans(sym) if k == "x" else apply_template(k, sym))
+        live_refresh_now()
+        send(live["chat"] or cfg["bot_owner_id"], msg)
+        return
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):
@@ -3760,6 +3989,7 @@ async def main():
     asyncio.create_task(live_loop())
     asyncio.create_task(chart_loop())
     asyncio.create_task(close_watch_loop())
+    asyncio.create_task(plan_loop())
     asyncio.create_task(price_loop())
     asyncio.create_task(web_listen_loop())
     await asyncio.Event().wait()

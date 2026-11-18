@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.31.0"
+VERSION = "1.31.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.31.1", ["Mở Custom Trailing / Custom TP-SL / Close Custom Size rồi không gõ mà bấm sang nút khác dưới /status → tin hướng dẫn tự bị xoá, ô nhập huỷ luôn"]),
     ("1.31.0", ["Nút mới dưới /status: Trailing Stop (ngay dưới Close Order) — giống Binance: Callback Rate · Size · Activation Price",
                 "Bấm nhanh 1% / 2% / 3% / 5% / 10%: đặt Trailing toàn bộ position trên sàn Bybit (chạy cả khi tắt máy)",
                 "✏️ Custom Trailing: gõ 3 (toàn bộ) · 3 20 (chỉ 20 USDT, tool tự theo dõi) · 3 all 4.10 (chờ giá chạm 4.10 mới bám)",
@@ -2704,6 +2705,7 @@ async def handle_callback(cq):
                 return await answer("Chọn position trước", True)
             asyncio.create_task(answer())
             live["menu"] = None
+            drop_inputs(chat, keep="cc")
             asyncio.create_task(kb_now())
             return await cc_ask(chat, symbol=sym)
         info = cc_info((live.get("cc") or {}).get("symbol"))
@@ -2774,12 +2776,14 @@ async def handle_callback(cq):
         if (live["menu"] == "tpl") != (cur == "tpl"):      # mo / dong Order Template -> hien / xoa bang mo ta
             asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
         live["confirm"] = None
+        drop_inputs(live["chat"] or cfg["bot_owner_id"])     # roi menu -> xoa tin hoi dang treo
         return await kb_answer(answer)
     if data == "ctr" or data.startswith("tr:"):   # Trailing Stop
         sym = sel_sym()
         if not sym:
             return await answer("Chọn position trước", True)
         chat = live["chat"] or cfg["bot_owner_id"]
+        drop_inputs(chat, keep="ctr" if data == "ctr" else None)
         if data == "ctr":
             live["menu"] = None
             asyncio.create_task(kb_answer(answer))
@@ -2805,6 +2809,7 @@ async def handle_callback(cq):
         if not sym:
             return await answer("Chọn position trước", True)
         live["menu"] = None
+        drop_inputs(live["chat"] or cfg["bot_owner_id"], keep="ctp")
         asyncio.create_task(kb_answer(answer))
         return await ctp_ask(live["chat"] or cfg["bot_owner_id"], sym)
     if data.startswith(("tp:", "sl:")):
@@ -2921,6 +2926,19 @@ def track_add(key, chat, *mids):
     g = tr.setdefault(key, {"chat": str(chat), "mids": []})
     g["mids"] += [int(m) for m in mids if m]
     save_cfg()
+
+
+def drop_inputs(chat, keep=None):
+    """Bam sang nut khac -> xoa tin hoi dang treo (Custom Trailing / Custom TP-SL / Close Custom Size) va huy o nhap."""
+    for k, groups in (("ctr", ("ctr",)), ("ctp", ("ctp", "ctp_confirm")), ("cc", ("cc",))):
+        if k == keep:
+            continue
+        live.pop(k, None)
+        if k == "ctp":
+            live.pop("ctp_pending", None)
+        for g in groups:
+            if (cfg.get("msg_track") or {}).get(g, {}).get("mids"):
+                track_new(g, chat)
 
 
 def clear_prompts(chat):

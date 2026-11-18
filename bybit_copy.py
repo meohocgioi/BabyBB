@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.25.3"
+VERSION = "1.25.4"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.25.4", ["Bar v2 gọn hơn: dòng đầu ghi Entry thay cho uPnL (uPnL đã có trong bảng), bỏ chữ \"Tới\" và \"USDT\""]),
     ("1.25.3", ["Bar v2: thay chữ \"dự kiến\" bằng % của TP / SL so với entry, vd Tới TP 4.38 (+29.97%)"]),
     ("1.25.2", ["Đổi tên 3 nút /status cho gọn: 1m 📊 · Bar v1 · Bar v2"]),
     ("1.25.1", ["/status có 3 nút trên 1 dòng: 1m Candle · Health Bar (ảnh) · Health Bar v2 (chữ, mặc định)"]),
@@ -1386,8 +1387,7 @@ def hb_parts(g, tg, sd):
     pct = (price / entry - 1) * 100 * d if entry else 0.0
     up = g["pnl"]
     clamp = lambda x: min(1.0, max(0.0, x))
-    parts = [f"{dot(up)} {coin_of(tg['symbol'] if tg else '')} {side_vn(sd)} · {num(price)} · {pct:+.2f}% · uPnL ",
-             chip(f"{up:+.2f}", up >= 0)]
+    parts = [f"{dot(up)} {coin_of(tg['symbol'] if tg else '')} {side_vn(sd)} · {num(price)} · {pct:+.2f}% · Entry {num(entry)}"]
     for icon, lab, key, full in (("🏁", "TP", "tp", "🟩"), ("💀", "SL", "sl", "🟥")):
         lv = (tg or {}).get(key)
         parts.append("\n")
@@ -1400,9 +1400,8 @@ def hb_parts(g, tg, sd):
         frac = clamp(moved / span) if span > 0 else 0.0
         n = int(round(frac * 10))
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
-        parts += [f"{icon} Tới {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f} USDT", exp >= 0),
+        parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
                   f"\n{full * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"]
-    parts.append(f"\nEntry {num(entry)}")
     return parts
 
 

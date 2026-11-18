@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.30.0"
+VERSION = "1.30.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.30.1", ["Gõ /status (hoặc bảng /status tự gửi) thì tin hỏi Custom TP-SL, Close Custom Size, cảnh báo và bảng Order Template đang treo tự bị xoá, ô nhập cũng huỷ luôn"]),
     ("1.30.0", ["Edit TP & SL → ✏️ Enter custom TP-SL: gõ \"TP SL\" (vd 10 5 = TP +10%, SL −5% từ entry từng acc), đặt luôn không hỏi",
                 "Nếu TP / SL đó làm lệnh khớp ngay: bot cảnh báo, gợi ý mức TP / SL an toàn, hỏi Tiếp tục / Cancel"]),
     ("1.29.2", ["Khi Telegram đang giới hạn bot, bấm nút sẽ hiện thông báo rõ (giới hạn tới mấy giờ) thay vì im lặng",
@@ -751,10 +752,12 @@ async def cc_ask(chat, warn=None, min_btn=False, symbol=None):
         kb = {"inline_keyboard": [[{"text": f"Close Minimum (~{info['min']:.2f} USDT)", "callback_data": "ccm"}]]}
     mid, _ = await _send_rich(chat, text, cc_prompt_blocks(info, warn and "⚠️ " + warn), kb)
     live["cc"] = {"t": time.time(), "mid": mid, "symbol": info["symbol"]}
+    track_new("cc", chat, mid)                 # xoa tin hoi cu
     if min_btn:                          # van cho go lai so khac: them 1 tin hoi co o nhap
         m2, _ = await _send(chat, "Hoặc gõ size khác (USDT):", {"force_reply": True,
                                                                  "input_field_placeholder": f"≥ {info['min']:.2f}"})
         live["cc"]["mid2"] = m2
+        track_add("cc", chat, m2)
 
 
 async def cc_close(chat, amount):
@@ -2708,8 +2711,18 @@ def track_add(key, chat, *mids):
     save_cfg()
 
 
+def clear_prompts(chat):
+    """Gui /status moi -> xoa cac tin hoi / canh bao / bang template dang treo va huy o nhap dang cho."""
+    for k in ("ctp", "cc", "ctp_pending", "tpl_pending"):
+        live.pop(k, None)
+    for g in ("ctp", "ctp_confirm", "cc", "tpl_confirm", "tpl_info"):
+        if (cfg.get("msg_track") or {}).get(g, {}).get("mids"):
+            track_new(g, chat)
+
+
 async def start_live(chat, user_mid=None):
     old = (live["chat"], live["mid"], live["rich"])
+    clear_prompts(chat)
     live_stop()
     live["confirm"] = None
     live["menu"] = None

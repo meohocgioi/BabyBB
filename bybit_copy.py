@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.22.0"
+VERSION = "1.23.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.23.1", ["Bỏ /setting, Rebalance và /mainkey — không dùng API key tài khoản chính vì lý do an toàn. Nếu bản 1.23.0 đã lưu key chính thì key đó được xoá khỏi máy"]),
     ("1.22.0", ["/status nhiều coin: mỗi coin có Health Bar / chart 1m riêng, nằm ngay trên bảng của coin đó",
                 "Close Order và Edit TP & SL: khi có nhiều coin, chọn position trước (mỗi coin 1 dòng) rồi mới chọn % / TP / SL",
                 "Nút \"▸ 5 acc\" mở chi tiết riêng cho từng coin"]),
@@ -190,6 +191,9 @@ def load_cfg():
             log(f"Lỗi đọc config.json: {e}")
     if not str(cfg.get("update_url") or "").strip():
         cfg["update_url"] = DEFAULT_UPDATE_URL
+    had = [cfg.pop(k, None) for k in ("main_key", "main_secret")]
+    if any(x is not None for x in had):    # ban 1.23.0 co the da luu API key tai khoan chinh -> xoa han
+        save_cfg()
 
 
 def save_cfg():

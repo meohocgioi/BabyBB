@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.27.1"
+VERSION = "1.27.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.27.2", ["Bar v3: đổi sang ô █░ chữ đều (monospace) — ô của thanh TP và SL bằng nhau trên mọi điện thoại, không còn xuống dòng"]),
     ("1.27.1", ["/setting dùng nút thường dưới tin, không bị cắt chữ: mỗi mục 1 nút riêng (Hiển thị /status, Auto Refresh), bấm vào mới hiện lựa chọn"]),
     ("1.27.0", ["Bar v3: thanh mảnh 20 ô [ ▰▰▰▱▱… ] cho TP / SL — chi tiết gấp đôi, không bị xuống dòng trên điện thoại",
                 "Chọn kiểu hiển thị /status (1m 📊 / Bar v1 / Bar v2 / Bar v3) chuyển vào /setting; tool nhớ lựa chọn. /status gọn hơn, bỏ hàng 3 nút"]),
@@ -854,7 +855,7 @@ async def close_watch_loop():
 
 
 VIEW_DESC = {"c1": "chart nến 1 phút (ảnh)", "hb": "thanh có đầu lâu / cờ (ảnh)",
-             "hb2": "ô màu 10 ô (chữ)", "hb3": "thanh mảnh 20 ô (chữ)"}
+             "hb2": "ô màu 10 ô (chữ)", "hb3": "thanh 20 ô █░ (chữ)"}
 
 
 def setting_blocks(note=None, page=None):
@@ -1428,8 +1429,10 @@ def chip(text, good):
 def hb_bar(frac, good, style):
     """v2: 10 o emoji mau. v3: 20 o unicode manh (khong xuong dong tren dien thoai)."""
     if style == "hb3":
+        # Chu monospace (code) + khoi █ ░: moi o rong bang nhau tren moi dien thoai.
+        # (▰ ▱ khong co trong font he thong -> iPhone muon font khac, o TP va SL lech kich thuoc)
         n = int(round(frac * 20))
-        return f"[ {'▰' * n}{'▱' * (20 - n)} ] {frac * 100:.0f}%"
+        return [K(f"[{'█' * n}{'░' * (20 - n)}]"), f" {frac * 100:.0f}%"]
     n = int(round(frac * 10))
     return f"{('🟩' if good else '🟥') * n}{'⬜' * (10 - n)} {frac * 100:.0f}%"
 
@@ -1456,7 +1459,7 @@ def hb_parts(g, tg, sd, style="hb2"):
         n = int(round(frac * 10))
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
         parts += [f"{icon} {lab} {num(lv)} ({mv:+.2f}%) ", chip(f"{exp:+.2f}", exp >= 0),
-                  "\n" + hb_bar(frac, key == "tp", style)]
+                  "\n"] + (lambda b: b if isinstance(b, list) else [b])(hb_bar(frac, key == "tp", style))
     return parts
 
 

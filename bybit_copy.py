@@ -4,12 +4,10 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.23.0"
+VERSION = "1.22.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
-    ("1.23.0", ["Lệnh /setting: bảng số dư USDT của các sub + nút ⚖️ Rebalance — tự chuyển tiền giữa các sub để số dư bằng nhau",
-                "Lệnh /mainkey apikey=secret: lưu API key tài khoản chính (bắt buộc cho Rebalance), tin chứa key tự xoá ngay"]),
     ("1.22.0", ["/status nhiều coin: mỗi coin có Health Bar / chart 1m riêng, nằm ngay trên bảng của coin đó",
                 "Close Order và Edit TP & SL: khi có nhiều coin, chọn position trước (mỗi coin 1 dòng) rồi mới chọn % / TP / SL",
                 "Nút \"▸ 5 acc\" mở chi tiết riêng cho từng coin"]),
@@ -155,7 +153,6 @@ DEFAULT_CFG = {
     "allin_lev": "",                # don bay /lev cho moi lenh: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
-    "main_key": "", "main_secret": "",     # API key tai khoan chinh (chi de chuyen tien giua cac sub — Rebalance)
     "update_url": DEFAULT_UPDATE_URL,
     "running": False,
 }
@@ -832,125 +829,6 @@ async def close_watch_loop():
             await _send_rich(cfg["bot_owner_id"], *close_report(rows, title=title))
         except Exception as e:
             log(f"close watch: {type(e).__name__}: {str(e)[:100]}")
-
-
-def main_client():
-    if cfg.get("main_key") and cfg.get("main_secret"):
-        return Bybit("Main", cfg["main_key"], cfg["main_secret"], ENVS.get(cfg["env"], ENVS["mainnet"]))
-    return None
-
-
-async def sub_uid(c):
-    """UID cua sub (lay tu API key cua chinh sub do, nho lai)."""
-    if getattr(c, "uid", None):
-        return c.uid
-    r = await c.req("GET", "/v5/user/query-api")
-    uid = (r.get("result") or {}).get("userID")
-    if not uid:
-        raise RuntimeError(f"không lấy được UID: {r.get('retMsg')}")
-    c.uid = str(uid)
-    return c.uid
-
-
-async def usdt_wallet(c):
-    r = await c.req("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
-    if r.get("retCode") != 0:
-        raise RuntimeError(str(r.get("retMsg")))
-    for a in r["result"]["list"]:
-        for x in a.get("coin") or []:
-            if x.get("coin") == "USDT":
-                return float(x.get("walletBalance") or 0)
-    return 0.0
-
-
-async def balances_all():
-    res = await asyncio.gather(*(usdt_wallet(c) for c in clients), return_exceptions=True)
-    return {c.name: r for c, r in zip(clients, res)}
-
-
-def rebalance_plan(bal):
-    """bal = {acc: USDT} -> (muc tieu, [(tu acc, toi acc, so tien)]) chuyen it lan nhat de cac acc bang nhau (lam tron 0.01)."""
-    target = sum(bal.values()) / len(bal)
-    give = sorted([[k, math.floor((v - target) * 100) / 100] for k, v in bal.items() if v - target >= 0.01], key=lambda x: -x[1])
-    need = sorted([[k, math.floor((target - v) * 100) / 100] for k, v in bal.items() if target - v >= 0.01], key=lambda x: -x[1])
-    plan = []
-    while give and need:
-        amt = round(min(give[0][1], need[0][1]), 2)
-        if amt < 0.01:
-            break
-        plan.append((give[0][0], need[0][0], amt))
-        give[0][1] = round(give[0][1] - amt, 2); need[0][1] = round(need[0][1] - amt, 2)
-        if give[0][1] < 0.01:
-            give.pop(0)
-        if need[0][1] < 0.01:
-            need.pop(0)
-        give.sort(key=lambda x: -x[1]); need.sort(key=lambda x: -x[1])
-    return target, plan
-
-
-def setting_blocks(bal, note=None, plan_done=None):
-    ok = {k: v for k, v in bal.items() if not isinstance(v, Exception)}
-    R = [[B(k), (f"{v:.2f}" if not isinstance(v, Exception) else f"⚠️ {str(v)[:40]}")] for k, v in bal.items()]
-    if ok:
-        R.append([B("Tổng"), B(f"{sum(ok.values()):.2f}")])
-        R.append([B("Trung bình"), B(f"{sum(ok.values()) / len(ok):.3f}")])
-    blocks = [r_head("⚙️ Setting"), r_table(["Acc", "USDT (wallet)"], R, [None, "right"])]
-    if plan_done:
-        blocks.append(r_table(["Đã chuyển", "USDT"], plan_done, [None, "right"]))
-    if note:
-        blocks.append(r_par(note))
-    blocks.append({"type": "buttons", "buttons": [{"text": "⚖️ Rebalance", "callback_data": "rb", "style": "primary"}]})
-    mk = "✅ đã cài" if main_client() else "❌ chưa cài (gõ /mainkey apikey=secret)"
-    blocks.append(r_foot(f"API tài khoản chính cho Rebalance: {mk} · {datetime.now().strftime('%H:%M:%S')}"))
-    return blocks
-
-
-async def setting_send(chat, umid=None):
-    bal = await balances_all()
-    mid, _ = await _send_rich(chat, "⚙️ Setting\n" + "\n".join(f"{k}: {v}" for k, v in bal.items()), setting_blocks(bal))
-    track_new("setting", chat, mid, umid)
-
-
-async def rebalance(chat, mid):
-    """Chia deu USDT cho cac sub. Bybit chi cho API key cua TAI KHOAN CHINH chuyen thang giua 2 sub."""
-    async def show(bal, note, done=None):
-        await bot_api("editMessageText", _quiet=True, chat_id=chat, message_id=mid,
-                      rich_message={"blocks": setting_blocks(bal, note, done)})
-    bal = await balances_all()
-    if any(isinstance(v, Exception) for v in bal.values()):
-        return await show(bal, "⚠️ Không đọc được số dư của 1 acc — chưa chuyển gì.")
-    if has_pos():
-        return await show(bal, "⚠️ Đang có position mở — đóng hết position rồi bấm Rebalance (chuyển tiền lúc đang mở lệnh có thể làm acc thiếu ký quỹ).")
-    mc = main_client()
-    if not mc:
-        return await show(bal, "⚠️ Cần API key của tài khoản CHÍNH (Bybit chỉ cho key của tài khoản chính chuyển tiền giữa 2 sub). "
-                               "Tạo key ở tài khoản chính, chỉ bật quyền Subaccount Transfer, rồi gõ: /mainkey apikey=secret")
-    target, plan = rebalance_plan(bal)
-    if not plan:
-        return await show(bal, f"✅ Các acc đã bằng nhau (~{target:.3f} USDT) — không cần chuyển.")
-    try:
-        uids = dict(zip([c.name for c in clients], await asyncio.gather(*(sub_uid(c) for c in clients))))
-    except Exception as e:
-        return await show(bal, f"⚠️ {e}")
-    await show(bal, f"⏳ Đang chuyển {len(plan)} lần để mỗi acc còn ~{target:.3f} USDT…")
-    done = []
-    busy["n"] += 1
-    try:
-        for a, b, amt in plan:
-            r = await mc.req("POST", "/v5/asset/transfer/universal-transfer", {
-                "transferId": str(__import__("uuid").uuid4()), "coin": "USDT", "amount": f"{amt:.2f}",
-                "fromMemberId": int(uids[a]), "toMemberId": int(uids[b]),
-                "fromAccountType": "UNIFIED", "toAccountType": "UNIFIED"})
-            okk = r.get("retCode") == 0
-            done.append([f"{'✅' if okk else '❌'} {a} → {b}" + ("" if okk else f"\n{str(r.get('retMsg'))[:60]}"), f"{amt:.2f}"])
-            log(f"⚖️ Rebalance {a} → {b} {amt:.2f} USDT: {'OK' if okk else r.get('retMsg')}")
-    finally:
-        busy["n"] -= 1
-    await asyncio.sleep(1.5)
-    bal2 = await balances_all()
-    bad = sum(1 for x in done if x[0].startswith("❌"))
-    await show(bal2, (f"✅ Rebalance xong: mỗi acc ~{target:.3f} USDT (lệch tối đa ~0.01 do làm tròn)." if not bad
-                      else f"⚠️ {bad}/{len(done)} lần chuyển bị lỗi — xem dòng ❌."), done)
 
 
 def short_margin(r):
@@ -1668,8 +1546,6 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cố định cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
-    ("/setting", "Cài đặt: Rebalance — chia đều tiền cho các sub account"),
-    ("/mainkey apikey=secret", "Lưu API key tài khoản chính (quyền Subaccount Transfer) để Rebalance — tin bạn gõ tự xoá ngay"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
@@ -1977,10 +1853,6 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
-    if data == "rb":                           # nut Rebalance trong /setting
-        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
-        asyncio.create_task(answer("Đang rebalance…"))
-        return await rebalance(chat, mid)
     if data in ("cc", "ccm"):
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         if data == "cc":
@@ -3274,25 +3146,6 @@ async def handle_update(u):
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], cmd, allin=("max",),
                                         side="Buy" if cmd == "/buyall" else "Sell")
                     return
-            elif cmd == "/setting":
-                asyncio.create_task(setting_send(chat, umid))
-                return
-            elif cmd == "/mainkey":
-                arg = ((m.get("text") or "").split(maxsplit=1)[1:] or [""])[0].strip()
-                asyncio.create_task(tg_delete(chat, [umid]))      # xoa ngay tin co chua secret
-                if "=" not in arg:
-                    send(chat, "Dùng: /mainkey apikey=apisecret (key của tài khoản CHÍNH, chỉ cần quyền Subaccount Transfer)")
-                    return
-                k_, _, s_ = arg.partition("=")
-                cfg["main_key"], cfg["main_secret"] = k_.strip(), s_.strip(); save_cfg()
-                mc = main_client()
-                r = await mc.req("GET", "/v5/user/query-api")
-                if r.get("retCode") == 0:
-                    log("🔑 Đã lưu API key tài khoản chính (từ Telegram)")
-                    send(chat, f"🔑 Đã lưu API key tài khoản chính (UID {(r.get('result') or {}).get('userID')}). Tin chứa key đã được xoá. Gõ /setting → Rebalance.")
-                else:
-                    send(chat, f"⚠️ Đã lưu nhưng Bybit báo key lỗi: {r.get('retMsg')}. Kiểm tra lại key/secret và quyền Subaccount Transfer.")
-                return
             elif cmd == "/debug":
                 rm, _ = await _send(chat, debug_text())
                 track_new("debug", chat, rm, umid)
@@ -3336,9 +3189,7 @@ async def handle_update(u):
 # Web UI
 # ----------------------------------------------------------------------------
 def public_cfg():
-    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note", "realized", "msg_track",
-                                                   "main_key", "main_secret")}
-    c["has_main_key"] = bool(cfg.get("main_key") and cfg.get("main_secret"))
+    c = {k: v for k, v in cfg.items() if k not in ("accounts", "bot_token", "live_msg", "update_note", "realized", "msg_track")}
     c["accounts"] = [{"name": a.get("name", ""), "key": a.get("key", ""),
                       "has_secret": bool(a.get("secret"))} for a in cfg["accounts"]]
     c["has_bot_token"] = bool(cfg["bot_token"])
@@ -3392,11 +3243,6 @@ async def h_save_cfg(req):
             cfg[k] = max(0.0, float(d[k]))
         except Exception:
             pass
-    mk = (d.get("main_api") or "").strip()
-    if "=" in mk:
-        k_, _, s_ = mk.partition("=")
-        cfg["main_key"], cfg["main_secret"] = k_.strip(), s_.strip()
-        log("🔑 Đã lưu API key tài khoản chính (dùng cho Rebalance)")
     new_token = (d.get("bot_token") or "").strip()
     if new_token and new_token != cfg["bot_token"]:
         if re.fullmatch(r"\d+:[\w-]{30,}", new_token):
@@ -3542,11 +3388,6 @@ def selftest():
     assert parse_buy("/buy #eth 1000 10 2")["size"] == 1000 and parse_allin("/buyall #x 1 2")["coin"] == "X"
     assert parse_allin("/sellall #x 1 2")["sl"] == 2 and parse_allin("/allin #x 1 2") is None
     assert num(2003.126) == "2003.13" and num("0.00432156") == "0.004322"
-    _t, _pl = rebalance_plan({"Acc1": 246.54, "Acc2": 246.44, "Acc3": 247.00, "Acc4": 245.76, "Acc5": 246.15})
-    _after = {"Acc1": 246.54, "Acc2": 246.44, "Acc3": 247.00, "Acc4": 245.76, "Acc5": 246.15}
-    for _a, _b, _x in _pl:
-        _after[_a] -= _x; _after[_b] += _x
-    assert abs(_t - 246.378) < 1e-6 and max(_after.values()) - min(_after.values()) <= 0.02, (_pl, _after)
     assert calc_leverage(1000, 100, 50)[0] == 11 and allin_plan(100, 10, 4.0)[0] == 4
     global clients
     clients = [Bybit("Acc1", "k", "s", "x")]
@@ -3726,7 +3567,6 @@ label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
     <label>Chat ID chủ bot (nhắn bất kỳ cho bot để bot báo ID)</label><input id="bot_owner_id">
     <label>Kiểu tin nhắn của bot</label><select id="widgets"><option value="1">Rich message (bảng biểu)</option><option value="0">Chữ thường</option></select>
     <label>Đòn bẩy cho mọi lệnh (số, hoặc max = max của coin; trống = auto: tự tính thấp nhất vừa đủ cho size)</label><input id="allin_lev" placeholder="auto">
-    <label>API key tài khoản CHÍNH cho Rebalance (apikey=apisecret, chỉ cần quyền Subaccount Transfer)</label><input id="main_api" type="text" class="secret" autocomplete="off" data-lpignore="true" data-1p-ignore>
     <div class="mut" style="font-size:12px;margin-top:6px">Lệnh: /buyall #coin tp sl · /sellall #coin tp sl · /lev N · /start · /stop · /status · /buy #coin size tp sl · /close · /help</div>
   </div>
 
@@ -3746,13 +3586,12 @@ function setMode(m){mode=m;$('m-follow').classList.toggle('sel',m=='follow');$('
 async function loadCfg(){cfg=await(await fetch('/api/config')).json();
   for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_owner_id','update_url','channel_id','allin_lev'])$(k).value=cfg[k]??'';
   $('bot_token').placeholder=cfg.has_bot_token?'•••• đã lưu':'';
-  $('main_api').placeholder=cfg.has_main_key?'•••• đã lưu':'chưa cài';
   $('widgets').value=cfg.widgets===false?'0':'1';
   $('acctxt').value=cfg.accounts.map(a=>a.key+'='+(a.has_secret?'••••••••':'')).join('\n');
   setMode(cfg.mode||'follow')}
 function collect(){const accounts=$('acctxt').value.split('\n').map(l=>l.trim()).filter(l=>l).map((l,i)=>{const p=l.indexOf('=');const key=(p<0?l:l.slice(0,p)).trim();let secret=p<0?'':l.slice(p+1).trim();if(/^•+$/.test(secret))secret='';return{name:'Acc'+(i+1),key,secret}});
   const o={accounts,mode,widgets:$('widgets').value};
-  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev','main_api'])o[k]=$(k).value;return o}
+  for(const k of['env','size_unit','custom_size','custom_tp','custom_sl','bot_token','bot_owner_id','update_url','channel_id','allin_lev'])o[k]=$(k).value;return o}
 async function save(){await post('/api/config',collect());toast('Đã lưu cài đặt');loadCfg()}
 async function manual(){const t=$('manual').value.trim();if(!t)return;if(confirm('Gửi LỆNH THẬT: '+t+' ?'))post('/api/manual',{text:t})}
 async function update(){const j=await post('/api/update');if(j&&j.restart)setTimeout(()=>location.reload(),5000)}

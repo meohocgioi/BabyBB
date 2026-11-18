@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.25.4"
+VERSION = "1.26.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.26.0", ["Lệnh /setting: Auto Refresh content — chọn 3s / 5s / 10s cho mọi nội dung tự cập nhật (/status, Bar v1, Bar v2, chart 1m). Mặc định 5s"]),
     ("1.25.4", ["Bar v2 gọn hơn: dòng đầu ghi Entry thay cho uPnL (uPnL đã có trong bảng), bỏ chữ \"Tới\" và \"USDT\""]),
     ("1.25.3", ["Bar v2: thay chữ \"dự kiến\" bằng % của TP / SL so với entry, vd Tới TP 4.38 (+29.97%)"]),
     ("1.25.2", ["Đổi tên 3 nút /status cho gọn: 1m 📊 · Bar v1 · Bar v2"]),
@@ -166,6 +167,7 @@ DEFAULT_CFG = {
     "allin_lev": "",                # don bay /lev cho moi lenh: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
+    "refresh": 5,                   # giay giua 2 lan tu cap nhat noi dung (/status, Health Bar, chart): 3 / 5 / 10
     "update_url": DEFAULT_UPDATE_URL,
     "running": False,
 }
@@ -845,6 +847,28 @@ async def close_watch_loop():
             await _send_rich(cfg["bot_owner_id"], *close_report(rows, title=title))
         except Exception as e:
             log(f"close watch: {type(e).__name__}: {str(e)[:100]}")
+
+
+def setting_blocks(note=None):
+    cur = refresh_s()
+    blocks = [r_head("⚙️ Setting"),
+              r_par(["Auto Refresh content: ", B(f"{cur}s / lần"),
+                     "\nÁp dụng cho mọi nội dung tự cập nhật: bảng /status, Bar v1, Bar v2, chart 1m."])]
+    btns = [{"text": ("✅ " if cur == v else "") + f"{v}s", "callback_data": f"rf:{v}"} for v in REFRESH_CHOICES]
+    if botst.get("rich_buttons") is not False:
+        blocks.append({"type": "buttons", "buttons": btns})
+    blocks.append(r_par("⚠️ 3s: dễ bị Telegram giới hạn (khoá bot vài giờ) nếu để /status chạy lâu. Khuyên dùng 5s."))
+    if note:
+        blocks.append(r_par(note))
+    blocks.append(r_foot(f"Last Update: {datetime.now().strftime('%H:%M:%S')}"))
+    kb = None if botst.get("rich_buttons") is not False else {"inline_keyboard": [btns]}
+    return blocks, kb
+
+
+async def setting_send(chat, umid=None):
+    blocks, kb = setting_blocks()
+    mid, _ = await _send_rich(chat, f"⚙️ Setting\nAuto Refresh content: {refresh_s()}s / lần", blocks, kb)
+    track_new("setting", chat, mid, umid)
 
 
 def short_margin(r):
@@ -1606,6 +1630,7 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cố định cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
+    ("/setting", "Cài đặt: Auto Refresh content 3s / 5s / 10s"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
@@ -1863,7 +1888,7 @@ def debug_text():
          f"Lần sửa thành công gần nhất: " + (f"{now - live['t']:.0f}s trước" if live.get('t') else "chưa có"),
          f"Đang chờ do Telegram giới hạn: {max(0, live.get('wait', 0) - now):.0f}s"
          + (f" (tới {datetime.fromtimestamp(live['wait']).strftime('%H:%M')})" if live.get('wait', 0) > now else ""),
-         f"Nhịp sửa tin: {(live.get('every', LIVE_EVERY) if now < live.get('every_until', 0) else LIVE_EVERY):.0f}s/lần",
+         f"Nhịp sửa tin: {(live.get('every', refresh_s()) if now < live.get('every_until', 0) else refresh_s()):.0f}s/lần (cài đặt {refresh_s()}s)",
          f"Ảnh tạm ẩn: {max(0, live.get('photo_off_until', 0) - now):.0f}s (lỗi ảnh liên tiếp: {live.get('photo_fail', 0)})",
          f"Đang vào/đóng lệnh (busy): {busy['n']}",
          "Số liệu Bybit: " + ", ".join(f"{c.name} {now - (status.get(c.name) or {}).get('t', 0):.0f}s" for c in clients)]
@@ -1940,6 +1965,23 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data.startswith("rf:"):                 # /setting -> Auto Refresh content
+        try:
+            v = int(data[3:])
+        except ValueError:
+            return await answer()
+        if v not in REFRESH_CHOICES:
+            return await answer()
+        cfg["refresh"] = v; save_cfg()
+        live.pop("every_until", None)          # ap dung ngay nhip moi
+        log(f"⚙️ Auto Refresh content: {v}s (từ Telegram)")
+        asyncio.create_task(answer(f"Auto Refresh: {v}s"))
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        blocks, kb = setting_blocks(f"✅ Đã đặt {v}s / lần.")
+        p = {"chat_id": chat, "message_id": mid, "rich_message": {"blocks": blocks}}
+        if kb:
+            p["reply_markup"] = kb
+        return await bot_api("editMessageText", _quiet=True, **p)
     if data in ("cc", "ccm"):
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         if data == "cc":
@@ -2046,8 +2088,16 @@ async def handle_callback(cq):
         if "Lỗi" in msg or "Không có" in msg:
             send(live["chat"] or cfg["bot_owner_id"], "✂️ " + msg)
 
-LIVE_EVERY = 5         # giay giua 2 lan sua tin (khi so lieu thay doi) — sua qua day Telegram se khoa hang gio
-HB_EVERY = 10          # giay giua 2 lan ve lai Health Bar
+REFRESH_CHOICES = (3, 5, 10)
+
+
+def refresh_s():
+    """Nhip tu cap nhat chung cho moi noi dung tu sua (/status, Bar v1, chart 1m) — chon trong /setting."""
+    try:
+        v = int(float(cfg.get("refresh") or 5))
+    except (TypeError, ValueError):
+        v = 5
+    return v if v in REFRESH_CHOICES else 5
 LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
@@ -2217,7 +2267,7 @@ async def live_loop():
             if not live["mid"] or not cfg["bot_token"]:
                 continue
             now = time.time()
-            every = live.get("every", LIVE_EVERY) if now < live.get("every_until", 0) else LIVE_EVERY
+            every = live.get("every", refresh_s()) if now < live.get("every_until", 0) else refresh_s()
             if now < live["wait"] or now - live["t"] < every:
                 continue
             if live.get("confirm") and live["confirm"][1] < now:
@@ -2238,7 +2288,7 @@ async def live_loop():
             elif "Too Many Requests" in desc or "retry after" in desc.lower():
                 wait = float((r.get("parameters") or {}).get("retry_after") or 10)
                 live["wait"] = time.time() + wait + 1
-                live["every"] = min(60, max(live.get("every", LIVE_EVERY) * 2, 15))   # sau do sua cham lai 1 tieng
+                live["every"] = min(60, max(live.get("every", refresh_s()) * 2, 15))   # sau do sua cham lai 1 tieng
                 live["every_until"] = time.time() + wait + 3600
                 log(f"/status: Telegram giới hạn tốc độ sửa tin — chờ {wait:.0f}s, sau đó sửa {live['every']:.0f}s/lần trong 1 tiếng")
             elif _net_err(desc):
@@ -2751,7 +2801,7 @@ async def chart_loop():
                 continue                     # dang vao/dong lenh -> nhuong duong
             nxt = now + 5                    # loi thi 5 giay sau thu lai
             await render_view(tgs)
-            nxt = time.time() + (HB_EVERY if live_view() == "hb" else CHART_EVERY)
+            nxt = time.time() + refresh_s()
         except Exception as e:
             log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
             nxt = time.time() + 10
@@ -3329,6 +3379,9 @@ async def handle_update(u):
                     await execute_order(a["coin"], 0, a["tp"], a["sl"], cmd, allin=("max",),
                                         side="Buy" if cmd == "/buyall" else "Sell")
                     return
+            elif cmd == "/setting":
+                asyncio.create_task(setting_send(chat, umid))
+                return
             elif cmd == "/debug":
                 rm, _ = await _send(chat, debug_text())
                 track_new("debug", chat, rm, umid)

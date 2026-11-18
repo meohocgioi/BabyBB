@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.24.1"
+VERSION = "1.24.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.24.2", ["Giảm số lần sửa tin /status (5s/lần, Health Bar 10s/lần) để Telegram không khoá bot hàng giờ vì sửa tin quá dày",
+                "Bị Telegram giới hạn: tool chờ đúng thời gian Telegram yêu cầu và tự sửa chậm lại, không gửi dồn thêm"]),
     ("1.24.1", ["Sửa: /update xong không thấy change log — giờ change log gửi riêng và tự thử lại tới khi gửi được",
                 "Sửa: /per có lúc chỉ hiện ảnh biểu đồ — luôn gửi kèm bảng; Telegram lỗi tạm thời thì thử lại; có lỗi thì bot báo ra chat"]),
     ("1.24.0", ["/per → Position History: tên mỗi lệnh (vd ▸ Long ZKP) là nút bấm — mở ra Entry, giá đóng trung bình, ROI% và PnL của từng acc"]),
@@ -1593,9 +1595,18 @@ async def bot_api(method, _timeout=8, _quiet=False, **params):
             j = await r.json()
     except Exception as e:
         j = {"ok": False, "description": f"{type(e).__name__}: {str(e)[:100]}".rstrip(": ")}
+    if not j.get("ok") and "Too Many Requests" in str(j.get("description")):
+        ra = float((j.get("parameters") or {}).get("retry_after") or 5)
+        botst["flood"] = (time.time(), ra, method)
     if not j.get("ok") and not _quiet:
         log(f"⚠️ Bot Telegram {method} lỗi: {j.get('description')}")
     return j
+
+
+def flood_wait():
+    """So giay con phai cho theo lan 429 gan nhat cua Telegram (0 neu khong bi gioi han)."""
+    f = botst.get("flood")
+    return max(0.0, f[0] + f[1] - time.time()) if f else 0.0
 
 
 async def _send(chat, text, kb=None):
@@ -1623,6 +1634,9 @@ async def _send_rich(chat, text, blocks, kb=None, rebuild=None):
                 botst["rich"] = True
                 return (r.get("result") or {}).get("message_id"), True
             desc = str(r.get("description"))
+            if "Too Many Requests" in desc:
+                log(f"Telegram đang giới hạn tốc độ gửi tin (chờ {flood_wait():.0f}s) — bỏ qua tin này")
+                return None, False
             if rebuild and "button" in desc.lower() and botst.get("rich_buttons") is not False:
                 botst["rich_buttons"] = False
                 log(f"Telegram không nhận nút trong tin ({desc[:100]}) — chuyển nút xuống dưới tin")
@@ -1789,8 +1803,10 @@ def debug_text():
     now = time.time()
     L = [f"🔧 Debug /status — v{VERSION}",
          f"Tin đang tự cập nhật: {'có (#' + str(live['mid']) + ')' if live.get('mid') else 'KHÔNG'}",
-         f"Lần sửa thành công gần nhất: {now - live.get('t', 0):.0f}s trước",
-         f"Đang chờ do Telegram giới hạn: {max(0, live.get('wait', 0) - now):.0f}s",
+         f"Lần sửa thành công gần nhất: " + (f"{now - live['t']:.0f}s trước" if live.get('t') else "chưa có"),
+         f"Đang chờ do Telegram giới hạn: {max(0, live.get('wait', 0) - now):.0f}s"
+         + (f" (tới {datetime.fromtimestamp(live['wait']).strftime('%H:%M')})" if live.get('wait', 0) > now else ""),
+         f"Nhịp sửa tin: {(live.get('every', LIVE_EVERY) if now < live.get('every_until', 0) else LIVE_EVERY):.0f}s/lần",
          f"Ảnh tạm ẩn: {max(0, live.get('photo_off_until', 0) - now):.0f}s (lỗi ảnh liên tiếp: {live.get('photo_fail', 0)})",
          f"Đang vào/đóng lệnh (busy): {busy['n']}",
          "Số liệu Bybit: " + ", ".join(f"{c.name} {now - (status.get(c.name) or {}).get('t', 0):.0f}s" for c in clients)]
@@ -1973,7 +1989,8 @@ async def handle_callback(cq):
         if "Lỗi" in msg or "Không có" in msg:
             send(live["chat"] or cfg["bot_owner_id"], "✂️ " + msg)
 
-LIVE_EVERY = 3         # giay giua 2 lan sua tin (khi so lieu thay doi)
+LIVE_EVERY = 5         # giay giua 2 lan sua tin (khi so lieu thay doi) — sua qua day Telegram se khoa hang gio
+HB_EVERY = 10          # giay giua 2 lan ve lai Health Bar
 LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
@@ -2138,7 +2155,8 @@ async def live_loop():
             if not live["mid"] or not cfg["bot_token"]:
                 continue
             now = time.time()
-            if now < live["wait"] or now - live["t"] < LIVE_EVERY:
+            every = live.get("every", LIVE_EVERY) if now < live.get("every_until", 0) else LIVE_EVERY
+            if now < live["wait"] or now - live["t"] < every:
                 continue
             if live.get("confirm") and live["confirm"][1] < now:
                 live["confirm"] = None     # het han xac nhan -> tra lai hang nut %
@@ -2158,7 +2176,9 @@ async def live_loop():
             elif "Too Many Requests" in desc or "retry after" in desc.lower():
                 wait = float((r.get("parameters") or {}).get("retry_after") or 10)
                 live["wait"] = time.time() + wait + 1
-                log(f"/status: Telegram giới hạn tốc độ sửa tin — chờ {wait:.0f}s")
+                live["every"] = min(60, max(live.get("every", LIVE_EVERY) * 2, 15))   # sau do sua cham lai 1 tieng
+                live["every_until"] = time.time() + wait + 3600
+                log(f"/status: Telegram giới hạn tốc độ sửa tin — chờ {wait:.0f}s, sau đó sửa {live['every']:.0f}s/lần trong 1 tiếng")
             elif _net_err(desc):
                 live["wait"] = time.time() + 5
             else:                      # tin da bi xoa / khong sua duoc nua
@@ -2667,7 +2687,7 @@ async def chart_loop():
                 continue                     # dang vao/dong lenh -> nhuong duong
             nxt = now + 5                    # loi thi 5 giay sau thu lai
             await render_view(tgs)
-            nxt = time.time() + (LIVE_EVERY if live_view() == "hb" else CHART_EVERY)
+            nxt = time.time() + (HB_EVERY if live_view() == "hb" else CHART_EVERY)
         except Exception as e:
             log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
             nxt = time.time() + 10
@@ -3065,7 +3085,7 @@ async def notify_order(text, opened, kb=None):
 async def send_update_note():
     """Sau khi cap nhat / quay ve ban cu: gui change log, thu lai toi khi gui duoc (toi da ~2 phut)."""
     for _ in range(40):
-        await asyncio.sleep(3)
+        await asyncio.sleep(max(3, min(flood_wait(), 900)))
         note = cfg.get("update_note")
         if not note:
             return

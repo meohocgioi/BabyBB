@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.27.0"
+VERSION = "1.27.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.27.1", ["/setting dùng nút thường dưới tin, không bị cắt chữ: mỗi mục 1 nút riêng (Hiển thị /status, Auto Refresh), bấm vào mới hiện lựa chọn"]),
     ("1.27.0", ["Bar v3: thanh mảnh 20 ô [ ▰▰▰▱▱… ] cho TP / SL — chi tiết gấp đôi, không bị xuống dòng trên điện thoại",
                 "Chọn kiểu hiển thị /status (1m 📊 / Bar v1 / Bar v2 / Bar v3) chuyển vào /setting; tool nhớ lựa chọn. /status gọn hơn, bỏ hàng 3 nút"]),
     ("1.26.0", ["Lệnh /setting: Auto Refresh content — chọn 3s / 5s / 10s cho mọi nội dung tự cập nhật (/status, Bar v1, Bar v2, chart 1m). Mặc định 5s"]),
@@ -852,26 +853,40 @@ async def close_watch_loop():
             log(f"close watch: {type(e).__name__}: {str(e)[:100]}")
 
 
-def setting_blocks(note=None):
+VIEW_DESC = {"c1": "chart nến 1 phút (ảnh)", "hb": "thanh có đầu lâu / cờ (ảnh)",
+             "hb2": "ô màu 10 ô (chữ)", "hb3": "thanh mảnh 20 ô (chữ)"}
+
+
+def setting_blocks(note=None, page=None):
+    """/setting: bang tom tat + nut thuong (inline keyboard) duoi tin. Moi muc 1 nut rieng, bam vao moi hien lua chon."""
     cur, view = refresh_s(), live_view()
-    vbtns = [{"text": ("✅ " if view == k else "⬜ ") + t, "callback_data": f"v:{k}"} for k, t in VIEWS]
-    btns = [{"text": ("✅ " if cur == v else "") + f"{v}s", "callback_data": f"rf:{v}"} for v in REFRESH_CHOICES]
-    inline = botst.get("rich_buttons") is not False
     blocks = [r_head("⚙️ Setting"),
-              r_par(["Hiển thị /status: ", B(dict(VIEWS)[view]),
-                     "\n1m 📊 chart nến · Bar v1 ảnh · Bar v2 ô màu · Bar v3 thanh mảnh 20 ô"])]
-    if inline:
-        blocks.append({"type": "buttons", "buttons": vbtns})
-    blocks.append(r_par(["Auto Refresh content: ", B(f"{cur}s / lần"),
-                         "\nÁp dụng cho mọi nội dung tự cập nhật: bảng /status, Bar v1/v2/v3, chart 1m."]))
-    if inline:
-        blocks.append({"type": "buttons", "buttons": btns})
-    blocks.append(r_par("⚠️ 3s: dễ bị Telegram giới hạn (khoá bot vài giờ) nếu để /status chạy lâu. Khuyên dùng 5s."))
+              r_table(["Mục", "Đang chọn"],
+                      [["Hiển thị /status", B(f"{dict(VIEWS)[view]}")],
+                       ["Auto Refresh content", B(f"{cur}s / lần")]], [None, "right"])]
+    if page == "view":
+        blocks.append(r_par("Chọn kiểu hiển thị bảng /status:\n" +
+                            "\n".join(f"• {t}: {VIEW_DESC[k]}" for k, t in VIEWS)))
+        rows = [[{"text": ("✅ " if view == k else "") + f"{t} — {VIEW_DESC[k]}", "callback_data": f"v:{k}"}] for k, t in VIEWS]
+    elif page == "rf":
+        blocks.append(r_par("Bao lâu cập nhật lại /status, Bar v1/v2/v3, chart 1m một lần.\n"
+                            "⚠️ 3s dễ bị Telegram giới hạn (khoá bot vài giờ) nếu để /status chạy lâu. Khuyên dùng 5s."))
+        rows = [[{"text": ("✅ " if cur == v else "") + f"{v}s", "callback_data": f"rf:{v}"} for v in REFRESH_CHOICES]]
+    else:
+        rows = [[{"text": f"🖥 Hiển thị /status: {dict(VIEWS)[view]}", "callback_data": "st:view"}],
+                [{"text": f"⏱ Auto Refresh content: {cur}s", "callback_data": "st:rf"}]]
+    if page:
+        rows.append([{"text": "⬅️ Quay lại", "callback_data": "st:"}])
     if note:
         blocks.append(r_par(note))
     blocks.append(r_foot(f"Last Update: {datetime.now().strftime('%H:%M:%S')}"))
-    kb = None if inline else {"inline_keyboard": [vbtns, btns]}
-    return blocks, kb
+    return blocks, {"inline_keyboard": rows}
+
+
+async def setting_show(chat, mid, note=None, page=None):
+    blocks, kb = setting_blocks(note, page)
+    return await bot_api("editMessageText", _quiet=True, chat_id=chat, message_id=mid,
+                         rich_message={"blocks": blocks}, reply_markup=kb)
 
 
 async def setting_send(chat, umid=None):
@@ -1981,6 +1996,10 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data.startswith("st:"):                 # /setting: mo 1 muc / quay lai
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        asyncio.create_task(answer())
+        return await setting_show(chat, mid, page=data[3:] or None)
     if data.startswith("v:"):                  # /setting -> kieu hien thi /status
         want = data[2:]
         if want not in dict(VIEWS):
@@ -1989,11 +2008,7 @@ async def handle_callback(cq):
         cfg["view"] = want; save_cfg()
         log(f"⚙️ Hiển thị /status: {dict(VIEWS)[want]} (từ Telegram)")
         asyncio.create_task(answer(dict(VIEWS)[want]))
-        blocks, kb = setting_blocks(f"✅ /status hiển thị {dict(VIEWS)[want]}.")
-        p = {"chat_id": chat, "message_id": mid, "rich_message": {"blocks": blocks}}
-        if kb:
-            p["reply_markup"] = kb
-        await bot_api("editMessageText", _quiet=True, **p)
+        await setting_show(chat, mid, f"✅ /status hiển thị {dict(VIEWS)[want]}.")
         tgs = [t for t in chart_targets() if t.get("entry")]
         if live.get("mid"):
             try:
@@ -2015,11 +2030,7 @@ async def handle_callback(cq):
         log(f"⚙️ Auto Refresh content: {v}s (từ Telegram)")
         asyncio.create_task(answer(f"Auto Refresh: {v}s"))
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
-        blocks, kb = setting_blocks(f"✅ Đã đặt {v}s / lần.")
-        p = {"chat_id": chat, "message_id": mid, "rich_message": {"blocks": blocks}}
-        if kb:
-            p["reply_markup"] = kb
-        return await bot_api("editMessageText", _quiet=True, **p)
+        return await setting_show(chat, mid, f"✅ Auto Refresh: {v}s / lần.")
     if data in ("cc", "ccm"):
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         if data == "cc":

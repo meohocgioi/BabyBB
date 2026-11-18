@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.24.0"
+VERSION = "1.24.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.24.1", ["Sửa: /update xong không thấy change log — giờ change log gửi riêng và tự thử lại tới khi gửi được",
+                "Sửa: /per có lúc chỉ hiện ảnh biểu đồ — luôn gửi kèm bảng; Telegram lỗi tạm thời thì thử lại; có lỗi thì bot báo ra chat"]),
     ("1.24.0", ["/per → Position History: tên mỗi lệnh (vd ▸ Long ZKP) là nút bấm — mở ra Entry, giá đóng trung bình, ROI% và PnL của từng acc"]),
     ("1.23.1", ["Bỏ /setting, Rebalance và /mainkey — không dùng API key tài khoản chính vì lý do an toàn. Nếu bản 1.23.0 đã lưu key chính thì key đó được xoá khỏi máy"]),
     ("1.22.0", ["/status nhiều coin: mỗi coin có Health Bar / chart 1m riêng, nằm ngay trên bảng của coin đó",
@@ -2955,14 +2957,27 @@ def photo_paused():
 
 
 async def per_send(chat, kind, user_mid=None):
+    try:
+        await _per_send(chat, kind, user_mid)
+    except Exception as e:
+        log(f"⚠️ /per lỗi: {type(e).__name__}: {str(e)[:150]}")
+        send(chat, f"⚠️ /per lỗi: {type(e).__name__}: {str(e)[:150]}\nGửi lại /per sau vài giây; nếu vẫn lỗi, chụp tin này để nhờ sửa.")
+
+
+async def _per_send(chat, kind, user_mid=None):
     text, blocks, kb, png = await per_build(kind)
     photo_mid = None
     if png:
         rich_on = cfg.get("widgets", True) and botst.get("rich") is not False
         if rich_on and botst.get("rich_photo") is not False:     # cach 1: anh nam ngay trong rich message
-            r = await bot_form("sendRichMessage", {"chat_id": str(chat), "reply_markup": kb,
-                                                   "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}},
-                               {"chart": png})
+            fields = {"chat_id": str(chat), "reply_markup": kb, "rich_message": {"blocks": [blocks[0], PHOTO_BLOCK] + blocks[1:]}}
+            r = await bot_form("sendRichMessage", fields, {"chart": png})
+            for _ in range(2):                 # mang / Telegram qua tai -> thu lai, khong bo kieu anh trong tin
+                d0 = str(r.get("description") or "")
+                if r.get("ok") or not (_net_err(d0) or "Too Many Requests" in d0):
+                    break
+                await asyncio.sleep(min(10, float((r.get("parameters") or {}).get("retry_after") or 1.5)))
+                r = await bot_form("sendRichMessage", fields, {"chart": png})
             if r.get("ok"):
                 botst["rich_photo"] = True
                 pm = (r.get("result") or {}).get("message_id")
@@ -2970,15 +2985,18 @@ async def per_send(chat, kind, user_mid=None):
                 track_new("per", chat, pm, user_mid)
                 return
             desc = str(r.get("description"))
-            if not _net_err(desc):
-                botst["rich_photo"] = False
-                log(f"Telegram không nhận ảnh trong rich message ({desc[:100]}) — gửi biểu đồ thành ảnh riêng phía trên bảng")
+            log(f"/per: Telegram không nhận ảnh trong tin ({desc[:120]}) — gửi biểu đồ thành ảnh riêng phía trên bảng")
+            if "photo" in desc.lower() and "block" in desc.lower():
+                botst["rich_photo"] = False    # chi tat han khi Telegram noi ro khong ho tro anh trong rich message
         r = await bot_form("sendPhoto", {"chat_id": str(chat)}, {"photo": png})   # cach 2: anh rieng, ngay tren bang
         if r.get("ok"):
             photo_mid = (r.get("result") or {}).get("message_id")
         else:
             log(f"⚠️ Không gửi được biểu đồ: {str(r.get('description'))[:100]}")
     mid, _ = await _send_rich(chat, text, blocks, kb)
+    if not mid:
+        log("⚠️ /per: không gửi được bảng — thử gửi bản chữ")
+        mid, _ = await _send(chat, text[:4000], kb)
     if mid:
         per_msgs[mid] = {"mode": "sep", "photo": photo_mid}
     track_new("per", chat, mid, photo_mid, user_mid)
@@ -3044,6 +3062,33 @@ async def notify_order(text, opened, kb=None):
         log(f"⚠️ Không gửi được bảng /status sau lệnh: {type(e).__name__}: {str(e)[:100]}")
 
 
+async def send_update_note():
+    """Sau khi cap nhat / quay ve ban cu: gui change log, thu lai toi khi gui duoc (toi da ~2 phut)."""
+    for _ in range(40):
+        await asyncio.sleep(3)
+        note = cfg.get("update_note")
+        if not note:
+            return
+        if not (cfg["bot_token"] and cfg["bot_owner_id"]):
+            continue
+        try:
+            m_old = re.search(r"(\d+(?:\.\d+)+) →", note)
+            if note.startswith("⬆️") and m_old:
+                rm, _ = await _send_rich(cfg["bot_owner_id"],
+                                         *changelog_msg(f"⬆️ Đã cập nhật v{m_old.group(1)} → v{VERSION}",
+                                                        changelog_since(m_old.group(1))))
+            else:
+                rm, _ = await _send(cfg["bot_owner_id"], note)
+            if rm:
+                cfg["update_note"] = ""
+                save_cfg()
+                track_add("update", cfg["bot_owner_id"], rm)
+                log(f"Đã gửi change log v{VERSION} qua bot")
+                return
+        except Exception as e:
+            log(f"Gửi change log lỗi: {type(e).__name__}: {str(e)[:100]}")
+
+
 async def tg_keepalive():
     """Giu san 1 ket noi toi Telegram de tin tra loi khong phai mo ket noi moi."""
     while True:
@@ -3068,6 +3113,8 @@ async def bot_loop():
                 err = str(r.get("description") or "không kết nối được Telegram")
                 if err != botst["err"]:
                     log(f"⚠️ Bot Telegram không nhận được lệnh: {err}")
+                    if "conflict" in err.lower():
+                        log("⚠️ Có 2 cửa sổ tool cùng chạy với 1 bot — tắt bớt 1 cửa sổ (chỉ để lại 1).")
                 botst.update(ok=False, err=err)
                 await asyncio.sleep(3)
                 continue
@@ -3076,7 +3123,7 @@ async def bot_loop():
                 botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")
                 botst["token"] = cfg["bot_token"]
                 log(f"🤖 Bot Telegram đã kết nối: {botst['name']} — hãy nhắn lệnh cho đúng bot này")
-                note = cfg.get("update_note")
+                note = None                    # change log gui o send_update_note()
                 if note and cfg["bot_owner_id"]:
                     m_old = re.search(r"(\d+(?:\.\d+)+) →", note)
                     if note.startswith("⬆️") and m_old:
@@ -3529,6 +3576,7 @@ async def main():
     asyncio.create_task(status_loop())
     asyncio.create_task(bot_loop())
     asyncio.create_task(tg_keepalive())
+    asyncio.create_task(send_update_note())
     asyncio.create_task(clear_pending_later())
     asyncio.create_task(live_loop())
     asyncio.create_task(chart_loop())

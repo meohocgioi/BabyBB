@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.29.1"
+VERSION = "1.29.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.29.2", ["Khi Telegram đang giới hạn bot, bấm nút sẽ hiện thông báo rõ (giới hạn tới mấy giờ) thay vì im lặng",
+                "Bấm nút lúc bị giới hạn không còn làm tool gửi dồn lên Telegram (tránh bị khoá lâu hơn)"]),
     ("1.29.1", ["Order Template: bảng giải thích ở trên, các nút TP v1 / TP v2 / Part-TP v1 nằm ngay dưới bảng (kèm nút Đóng)"]),
     ("1.29.0", ["Mở Order Template: bot gửi kèm bảng mô tả TP v1 / TP v2 / Part-TP v1 (tự xoá khi đóng menu)",
                 "Template sẽ khớp lệnh ngay (giá đã vượt TP / qua SL / qua mốc Part-TP): bot cảnh báo và hỏi Tiếp tục / Cancel trước khi làm"]),
@@ -2223,10 +2225,26 @@ async def kb_now():
     async with live_lock():
         r = await bot_api("editMessageReplyMarkup", _quiet=True, chat_id=live["chat"], message_id=live["mid"],
                           reply_markup=live_kb() or {"inline_keyboard": []})
-        if r.get("ok") or "not modified" in str(r.get("description")):
+        desc = str(r.get("description"))
+        if r.get("ok") or "not modified" in desc:
             live["sig"] = live_sig()          # vong cap nhat khong can sua lai
+        elif "Too Many Requests" in desc:
+            ra = float((r.get("parameters") or {}).get("retry_after") or 10)
+            live["wait"] = max(live.get("wait", 0), time.time() + ra + 1)
         else:
             live_refresh_now()
+        return r
+
+
+async def kb_answer(answer, text=""):
+    """Doi hang nut roi moi tat vong xoay tren nut: Telegram dang gioi han thi bao ro thay vi im lang."""
+    r = await kb_now() or {}
+    if "Too Many Requests" in str(r.get("description")):
+        ra = float((r.get("parameters") or {}).get("retry_after") or 10)
+        until = datetime.fromtimestamp(time.time() + ra).strftime("%H:%M")
+        return await answer(f"⏳ Telegram đang giới hạn bot tới khoảng {until} — nút chưa đổi được. "
+                            "Lệnh vẫn chạy trên Bybit; thử lại sau giờ đó.", True)
+    return await answer(text)
 
 
 def live_note(r, how):
@@ -2269,7 +2287,10 @@ async def edit_now():
 
 
 def live_refresh_now():
-    live.update(sig="", t=0.0, wait=0.0)
+    """Sua lai tin /status ngay — nhung KHONG bo qua thoi gian Telegram bat cho (neu dang bi gioi han)."""
+    live.update(sig="", t=0.0)
+    if live.get("wait", 0) < time.time():
+        live["wait"] = 0.0
 
 
 async def handle_callback(cq):
@@ -2415,15 +2436,13 @@ async def handle_callback(cq):
         return
     if data == "tplclose":                     # nut Dong o bang Order Template
         live["menu"] = None
-        asyncio.create_task(answer())
         asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], False))
-        return await kb_now()
+        return await kb_answer(answer)
     if mid != live["mid"]:
         return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
     if data == "no":
         live["confirm"] = None
-        asyncio.create_task(answer("Đã huỷ"))
-        return await kb_now()
+        return await kb_answer(answer, "Đã huỷ")
     if data.startswith("dt"):                  # mo / dong bang chi tiet tung acc cua 1 coin
         sym = data[3:]
         det = set(live.get("detail") or set())
@@ -2433,10 +2452,9 @@ async def handle_callback(cq):
         return await edit_now()
     if data.startswith("ps:"):                 # chon position cho Close Order / Edit TP & SL / Order Template
         live["sel"] = data[3:] or None
-        asyncio.create_task(answer())
         if live.get("menu") == "tpl":
             asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], bool(live["sel"])))
-        return await kb_now()
+        return await kb_answer(answer)
     if data.startswith("m:"):                  # mo / dong cac hang nut phu
         want, cur = data[2:], live.get("menu")
         if want not in ("close", "tpsl", "tp", "sl", "tpl"):
@@ -2452,8 +2470,7 @@ async def handle_callback(cq):
         if (live["menu"] == "tpl") != (cur == "tpl"):      # mo / dong Order Template -> hien / xoa bang mo ta
             asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
         live["confirm"] = None
-        asyncio.create_task(answer())
-        return await kb_now()
+        return await kb_answer(answer)
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):

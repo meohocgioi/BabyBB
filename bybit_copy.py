@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.29.0"
+VERSION = "1.29.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.29.1", ["Order Template: bảng giải thích ở trên, các nút TP v1 / TP v2 / Part-TP v1 nằm ngay dưới bảng (kèm nút Đóng)"]),
     ("1.29.0", ["Mở Order Template: bot gửi kèm bảng mô tả TP v1 / TP v2 / Part-TP v1 (tự xoá khi đóng menu)",
                 "Template sẽ khớp lệnh ngay (giá đã vượt TP / qua SL / qua mốc Part-TP): bot cảnh báo và hỏi Tiếp tục / Cancel trước khi làm"]),
     ("1.28.2", ["Nút dưới /status gọn hơn: mỗi nút chính 1 dòng; mở nút nào chỉ hiện nút phụ của nút đó, ẩn các nút khác (bấm ▾ để quay lại)"]),
@@ -966,12 +967,24 @@ def template_info_blocks():
             r_par("Gỡ TP trên sàn, đặt SL −2%; tool tự chốt từng mốc (máy phải bật). Mốc đã bị giá vượt qua khi bấm sẽ được hỏi xác nhận trước.")]
 
 
+def tpl_kb(sym):
+    rows = [[{"text": label, "callback_data": f"tpl:{k}"}] for k, (label, _) in TEMPLATES.items()]
+    if any(pl.get("sym") == sym for pl in (cfg.get("plans") or {}).values()):
+        rows.append([{"text": "✖ Huỷ template đang chạy", "callback_data": "tpl:x"}])
+    rows.append([{"text": "⬅️ Đóng", "callback_data": "tplclose"}])
+    return {"inline_keyboard": rows}
+
+
 async def tpl_info_show(chat, on):
-    if on:
-        mid, _ = await _send_rich(chat, "📋 Order Template: TP v1 / TP v2 / Part-TP v1", template_info_blocks())
+    """Mo Order Template: gui bang mo ta (o tren) kem cac nut template (o duoi). on=False: xoa tin do."""
+    sym = sel_sym() if on else None
+    if on and sym:
+        blocks = template_info_blocks()
+        blocks[0] = r_head(f"📋 Order Template — {coin_of(sym)}")
+        mid, _ = await _send_rich(chat, f"📋 Order Template — {coin_of(sym)}: TP v1 / TP v2 / Part-TP v1", blocks, tpl_kb(sym))
         track_new("tpl_info", chat, mid)
     else:
-        track_new("tpl_info", chat)            # dong menu -> xoa bang mo ta
+        track_new("tpl_info", chat)            # dong menu / chua chon coin -> xoa bang mo ta
 
 
 def template_hits(k, sym):
@@ -2106,10 +2119,7 @@ def live_kb():
         rows.append([{"text": f"{p}%", "callback_data": f"cp:{p}"} for p in CLOSE_PCTS])
         rows.append([{"text": "Close Custom Size", "callback_data": "cc"}])
     elif top == "tpl":
-        for k, (label, _) in TEMPLATES.items():
-            rows.append([{"text": label, "callback_data": f"tpl:{k}"}])
-        if any(pl.get("sym") == sel_sym() for pl in (cfg.get("plans") or {}).values()):
-            rows.append([{"text": "✖ Huỷ template đang chạy", "callback_data": "tpl:x"}])
+        rows.append([{"text": "👇 chọn template ở bảng bên dưới", "callback_data": "noop"}])
     elif menu == "tpsl":                              # chua chon TP hay SL
         rows.append([{"text": "Edit TP", "callback_data": "m:tp"}])
         rows.append([{"text": "Edit SL", "callback_data": "m:sl"}])
@@ -2377,40 +2387,6 @@ async def handle_callback(cq):
         asyncio.create_task(answer(f"Đang đóng {info['min']:.2f} USDT…"))
         await bot_api("editMessageReplyMarkup", _quiet=True, chat_id=chat, message_id=mid)
         return await cc_close(chat, info["min"])
-    if mid != live["mid"]:
-        return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
-    if data == "no":
-        live["confirm"] = None
-        asyncio.create_task(answer("Đã huỷ"))
-        return await kb_now()
-    if data.startswith("dt"):                  # mo / dong bang chi tiet tung acc cua 1 coin
-        sym = data[3:]
-        det = set(live.get("detail") or set())
-        det.symmetric_difference_update({sym})
-        live["detail"] = det
-        asyncio.create_task(answer())
-        return await edit_now()
-    if data.startswith("ps:"):                 # chon position cho Close Order / Edit TP & SL
-        live["sel"] = data[3:] or None
-        asyncio.create_task(answer())
-        return await kb_now()
-    if data.startswith("m:"):                  # mo / dong cac hang nut phu
-        want, cur = data[2:], live.get("menu")
-        if want not in ("close", "tpsl", "tp", "sl", "tpl"):
-            return await answer()
-        if want == "tpsl":
-            live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
-        elif want in ("close", "tpl"):
-            live["menu"] = None if cur == want else want
-        else:                                  # Edit TP / Edit SL trong menu Edit TP & SL
-            live["menu"] = "tpsl" if cur == want else want
-        if want in ("close", "tpsl", "tpl") and live["menu"] == want:
-            live["sel"] = None                 # mo menu moi -> chon lai position
-        if (live["menu"] == "tpl") != (cur == "tpl"):      # mo / dong Order Template -> hien / xoa bang mo ta
-            asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
-        live["confirm"] = None
-        asyncio.create_task(answer())
-        return await kb_now()
     if data.startswith("tpl:"):                # Order Template
         k = data[4:]
         sym = sel_sym()
@@ -2437,6 +2413,47 @@ async def handle_callback(cq):
         live_refresh_now()
         send(chat, msg)
         return
+    if data == "tplclose":                     # nut Dong o bang Order Template
+        live["menu"] = None
+        asyncio.create_task(answer())
+        asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], False))
+        return await kb_now()
+    if mid != live["mid"]:
+        return await answer("Tin này đã cũ — gõ /status để có tin mới", True)
+    if data == "no":
+        live["confirm"] = None
+        asyncio.create_task(answer("Đã huỷ"))
+        return await kb_now()
+    if data.startswith("dt"):                  # mo / dong bang chi tiet tung acc cua 1 coin
+        sym = data[3:]
+        det = set(live.get("detail") or set())
+        det.symmetric_difference_update({sym})
+        live["detail"] = det
+        asyncio.create_task(answer())
+        return await edit_now()
+    if data.startswith("ps:"):                 # chon position cho Close Order / Edit TP & SL / Order Template
+        live["sel"] = data[3:] or None
+        asyncio.create_task(answer())
+        if live.get("menu") == "tpl":
+            asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], bool(live["sel"])))
+        return await kb_now()
+    if data.startswith("m:"):                  # mo / dong cac hang nut phu
+        want, cur = data[2:], live.get("menu")
+        if want not in ("close", "tpsl", "tp", "sl", "tpl"):
+            return await answer()
+        if want == "tpsl":
+            live["menu"] = None if cur in ("tpsl", "tp", "sl") else "tpsl"
+        elif want in ("close", "tpl"):
+            live["menu"] = None if cur == want else want
+        else:                                  # Edit TP / Edit SL trong menu Edit TP & SL
+            live["menu"] = "tpsl" if cur == want else want
+        if want in ("close", "tpsl", "tpl") and live["menu"] == want:
+            live["sel"] = None                 # mo menu moi -> chon lai position
+        if (live["menu"] == "tpl") != (cur == "tpl"):      # mo / dong Order Template -> hien / xoa bang mo ta
+            asyncio.create_task(tpl_info_show(live["chat"] or cfg["bot_owner_id"], live["menu"] == "tpl"))
+        live["confirm"] = None
+        asyncio.create_task(answer())
+        return await kb_now()
     if data.startswith(("tp:", "sl:")):
         kind, _, val = data.partition(":")
         if not val.isdigit() or int(val) not in (0,) + tuple(TPSL_PCTS):

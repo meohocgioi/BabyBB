@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.34.1"
+VERSION = "1.34.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.34.2", ["Position History: bảng chi tiết từng acc ghi PnL (USDT) to ở trên, ROI % nhỏ ở dưới — giống cột PnL của bảng chính"]),
     ("1.34.1", ["Telegram lỗi Bad Gateway / Timeout liên tiếp: tool tự mở lại kết nối mới tới Telegram để bot nhanh hoạt động lại"]),
     ("1.34.0", ["Position History: mỗi position 1 dòng (gộp mọi lần đóng từ lúc mở tới lúc đóng hết, kể cả các acc chạm TP / SL vào các giờ khác nhau, hay đóng tay một phần trước)",
                 "Bấm mở 1 position: mỗi acc ghi TP / SL đang chạy (template TP v1 / TP v2 / Part-TP, Custom TP-SL, Edit TP/SL hay lệnh /buy…), mức TP / SL % từ entry và lý do đóng (TP / SL / Tool…)",
@@ -4033,8 +4034,8 @@ def history_view(data, limit=5, reasons=None, opened=None):
                 why = " / ".join(sorted(a["why"]))
                 D_.append([[B(acc), f" x{a['lev']:g}{setup}"],
                            f"Entry {num(entry)}\nClose {num(close)}" + (f"\n{why}" if why else ""),
-                           [B(f"{dot(a['pnl'])}\u00a0{roi:+.2f}%"), f"\n{a['pnl']:+.2f}"]])
-            blocks.append(r_table(["Acc", f"{name} · giá", "ROI · PnL"], D_, [None, None, "right"]))
+                           [B(f"{dot(a['pnl'])}\u00a0{a['pnl']:+.2f}"), f"\n{roi:+.2f}%"]])
+            blocks.append(r_table(["Acc", f"{name} · giá", "PnL · ROI"], D_, [None, None, "right"]))
     flush(first)
     stamp = f"PnL đã gồm phí · ROI = PnL / ký quỹ · USDT · Last Update: {datetime.now().strftime('%H:%M:%S')}"
     if R:

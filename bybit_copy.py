@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.33.1"
+VERSION = "1.34.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.34.0", ["Position History: mỗi position 1 dòng (gộp mọi lần đóng từ lúc mở tới lúc đóng hết, kể cả các acc chạm TP / SL vào các giờ khác nhau, hay đóng tay một phần trước)",
+                "Bấm mở 1 position: mỗi acc ghi TP / SL đang chạy (template TP v1 / TP v2 / Part-TP, Custom TP-SL, Edit TP/SL hay lệnh /buy…), mức TP / SL % từ entry và lý do đóng (TP / SL / Tool…)",
+                "Thông tin TP / SL từng acc được ghi lại từ bản này trở đi (các position đã đóng trước đó không có)"]),
     ("1.33.1", ["Realized PnL tách riêng từng position: bỏ bảng Realized PnL gộp ở cuối /status, mỗi coin có dòng Realized trong bảng của coin đó",
                 "Coin đang mở từ trước (chưa có số liệu riêng) được tool tự tính lại Realized từ lịch sử lệnh trên Bybit",
                 "Tin báo đóng lệnh ghi tổng cả position của từng coin, không gộp các coin"]),
@@ -1503,6 +1506,7 @@ async def ctp_apply(chat, sym, tp, sl, force=False):
         return
     live.pop("ctp", None)
     (cfg.get("tpl_applied") or {}).pop(sym, None)              # sua tay -> template cu khong con dung
+    cfg.setdefault("tpsl_src", {})[sym] = "Custom TP-SL"
     for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == sym and pl.get("type") != "trail"]:
         cfg["plans"].pop(x)
     save_cfg()
@@ -1612,6 +1616,7 @@ async def _execute_order(coin, notional, tp, sl, source, t0=None, allin=None, si
         msg = f"❌ Không lấy được giá {symbol}: {perr}\n💡 Thường do mạng tới Bybit chập chờn: gửi lại lệnh sau vài giây."
         log(msg); asyncio.create_task(notify(msg))
         return msg
+    cfg.setdefault("tpsl_src", {})[symbol] = source.split()[0] if source else "Lệnh"      # nguon TP / SL (cho Position History)
     res = await asyncio.gather(*(open_one(c, symbol, notional, tp, sl, price, allin, side) for c in clients))
     ms = int((time.time() - t0) * 1000)
     if allin:
@@ -1860,6 +1865,65 @@ def add_realized(rows):
             b["accs"].append(x["acc"])
         b["est"] = b["est"] or bool(x.get("est"))
     save_cfg()
+
+
+def _pct_txt(lv, e, sd):
+    if not lv or not e:
+        return None
+    v = round((lv / e - 1) * 100 * (1 if sd == "Buy" else -1), 2)
+    return "= entry" if v == 0 else f"{v:+g}%"
+
+
+def tpsl_snap():
+    """Moi vong cap nhat: ghi lai TP / SL + nguon (template / Custom / lenh) dang dat cho tung acc.
+    Position dong het -> chuyen ban ghi cuoi vao lich su (de Position History biet acc do chay TP / SL nao)."""
+    live_s = cfg.setdefault("tpsl_live", {})
+    hist = cfg.setdefault("tpsl_hist", {})
+    ap, src = cfg.get("tpl_applied") or {}, cfg.get("tpsl_src") or {}
+    plans = cfg.get("plans") or {}
+    now = int(time.time() * 1000) + time_offset
+    seen, changed = set(), False
+    for c in clients:
+        st = status.get(c.name) or {}
+        if st.get("error") or not st.get("t"):
+            seen |= {k for k in live_s if k.startswith(c.name + ":")}      # acc loi -> chua ket luan
+            continue
+        for p in st.get("positions") or []:
+            k = f"{c.name}:{p['symbol']}"
+            seen.add(k)
+            tpl = ap.get(p["symbol"])
+            lab = TEMPLATES[tpl][0].replace("🧑🏻‍🤝‍🧑🏻", "") if tpl in TEMPLATES else src.get(p["symbol"], "")
+            if float(p.get("ts") or 0) > 0:
+                lab = (lab + " + " if lab else "") + "Trailing"
+            if plans.get(f"trail:{k}"):
+                lab = (lab + " + " if lab else "") + f"Trailing {plans[f'trail:{k}']['rate']:g}%"
+            pl = plans.get(k) or {}
+            sl_txt = _pct_txt(float(p.get("sl") or 0), p["avg"], p["side"])
+            if pl.get("type") == "slwait" and pl.get("sl_pct") is not None:     # TP v2: SL loi dang cho
+                sl_txt = f"{sl_txt or '—'} → {pct_lbl(pl['sl_pct'])}"
+            v = {"src": lab, "tp": _pct_txt(float(p.get("tp") or 0), p["avg"], p["side"]), "sl": sl_txt}
+            if pl.get("type") == "ptp":
+                v["tp"] = "chốt dần " + "·".join(f"{x[0]:g}" for x in PTP_STEPS) + "%"
+            if {kk: live_s.get(k, {}).get(kk) for kk in v} != v:
+                live_s[k] = v; changed = True
+            live_s[k]["t"] = now
+    for k in [k for k in live_s if k not in seen]:
+        h = hist.setdefault(k, [])
+        h.append(dict(live_s.pop(k), end=now))
+        del h[:-10]
+        changed = True
+    if changed:
+        save_cfg()
+
+
+def tpsl_of(acc, sym, t_close):
+    """TP / SL acc dang chay luc dong (t_close, ms) -> dict hoac None."""
+    k = f"{acc}:{sym}"
+    for h in (cfg.get("tpsl_hist") or {}).get(k) or []:
+        if h["end"] >= t_close - 60000 and h.get("t", h["end"]) >= t_close - 7 * 86400000:
+            return h
+    lv = (cfg.get("tpsl_live") or {}).get(k)
+    return lv if lv and lv.get("t", 0) >= t_close - 60000 else None
 
 
 _rz_tried = set()
@@ -2247,6 +2311,8 @@ async def status_loop():
             if clients and not busy["n"] and all((status.get(c.name) or {}).get("t", 0) > time.time() - 10 and
                                                  not (status.get(c.name) or {}).get("error") for c in clients):
                 rz_tidy()
+            if clients:
+                tpsl_snap()
             record_balance()
             if n % 20 == 0:    # ~1 phut: dong ho may co the bi Windows chinh lai bat cu luc nao
                 await sync_time()
@@ -2582,6 +2648,7 @@ def sel_sym():
 async def set_tpsl_all(kind, pct, only=None):
     if only:                                   # sua TP / SL tay -> template cu khong con dung
         (cfg.get("tpl_applied") or {}).pop(only, None)
+        cfg.setdefault("tpsl_src", {})[only] = "Edit TP/SL"
         for x in [k for k, pl in (cfg.get("plans") or {}).items() if pl.get("sym") == only and pl.get("type") != "trail"]:
             cfg["plans"].pop(x)
         save_cfg()
@@ -3885,21 +3952,32 @@ def history_view(data, limit=5, reasons=None, opened=None):
             errs.append(f"{name}: ⚠️ {str(rs)[:60]}")
         else:
             recs += [dict(_rec(x), acc=name) for x in rs]
-    recs.sort(key=lambda x: -x["t"])
-    groups = []
+    recs.sort(key=lambda x: x["t"])
+    groups, cur = [], {}
     for x in recs:
-        g = next((g for g in groups if g["symbol"] == x["symbol"] and g["side"] == x["side"]
-                  and abs(g["t"] - x["t"]) <= 60000), None)
+        # 1 position = moi lan dong cua cung coin, cung chieu, tu luc mo toi luc dong het (TP / SL / dong tay o cac
+        # acc vao cac thoi diem khac nhau). Acc dong tiep voi cung gia entry = dong tiep phan con lai cua position do;
+        # acc da dong ma lai dong voi entry khac (hoac cach qua 2 ngay) = position moi.
+        e = x["ev"] / x["q"] if x["q"] else 0
+        g = cur.get((x["symbol"], x["side"]))
+        if g is not None:
+            last = g["last"].get(x["acc"])
+            if x["t"] - g["t"] > 2 * 86400000 or (last is not None and abs(last - e) > max(last, e) * 1e-6):
+                g = None
         if g is None:
-            g = {"symbol": x["symbol"], "side": x["side"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0, "accs": set(),
-                 "why": set(), "per": {}}
+            g = {"symbol": x["symbol"], "side": x["side"], "t0": x["t"], "t": x["t"], "size": 0.0, "pnl": 0.0, "fee": 0.0,
+                 "accs": set(), "why": set(), "per": {}, "last": {}}
             groups.append(g)
+            cur[(x["symbol"], x["side"])] = g
+        g["t"] = x["t"]
+        g["last"][x["acc"]] = e
         g["size"] += x["size"]; g["pnl"] += x["pnl"]; g["fee"] += x["fee"]; g["accs"].add(x["acc"])
-        a = g["per"].setdefault(x["acc"], {"q": 0.0, "ev": 0.0, "xv": 0.0, "pnl": 0.0, "lev": x["lev"]})
-        a["q"] += x["q"]; a["ev"] += x["ev"]; a["xv"] += x["xv"]; a["pnl"] += x["pnl"]
+        a = g["per"].setdefault(x["acc"], {"q": 0.0, "ev": 0.0, "xv": 0.0, "pnl": 0.0, "lev": x["lev"], "why": set(), "t": 0})
+        a["q"] += x["q"]; a["ev"] += x["ev"]; a["xv"] += x["xv"]; a["pnl"] += x["pnl"]; a["t"] = x["t"]
         if reasons and reasons.get(x.get("oid")):
             g["why"].add(reasons[x["oid"]])
-    groups = groups[:limit]
+            a["why"].add(reasons[x["oid"]])
+    groups = sorted(groups, key=lambda g: -g["t"])[:limit]
     title = "🧾 Position History"
     T, R = [title], []
     opened = opened or set()
@@ -3915,7 +3993,7 @@ def history_view(data, limit=5, reasons=None, opened=None):
         when = datetime.fromtimestamp((g["t"] - time_offset) / 1000).strftime("%d/%m %H:%M")
         name = f"{side_vn(g['side'])} {g['symbol'][:-4] if g['symbol'].endswith('USDT') else g['symbol']}"
         who = f"{len(g['accs'])} acc" + (" · " + " / ".join(sorted(g["why"])) if g["why"] else "")
-        key = f"{g['symbol']}:{int(g['t'] // 1000)}"
+        key = f"{g['symbol']}:{int(g['t0'] // 1000)}"
         is_open = key in opened
         T.append(f"{name} ({when}, {who}) | size {g['size']:.2f} USDT | {dot(g['pnl'])} {g['pnl']:+.2f} USDT | fee {g['fee']:.2f}")
         btn = {"type": "button", "button": {"text": ("▾ " if is_open else "▸ ") + name, "callback_data": f"hx:{key}"}}
@@ -3930,7 +4008,14 @@ def history_view(data, limit=5, reasons=None, opened=None):
                 close = a["xv"] / a["q"] if a["q"] else 0
                 margin = a["ev"] / a["lev"] if a["lev"] else a["ev"]
                 roi = a["pnl"] / margin * 100 if margin else 0
-                D_.append([[B(acc), f" x{a['lev']:g}"], f"Entry {num(entry)}\nClose {num(close)}",
+                ts = tpsl_of(acc, g["symbol"], a["t"])
+                setup = ""
+                if ts:
+                    setup = (f"\n{ts['src']}" if ts.get("src") else "") + \
+                            f"\nTP {ts.get('tp') or '—'}\nSL {ts.get('sl') or '—'}"
+                why = " / ".join(sorted(a["why"]))
+                D_.append([[B(acc), f" x{a['lev']:g}{setup}"],
+                           f"Entry {num(entry)}\nClose {num(close)}" + (f"\n{why}" if why else ""),
                            [B(f"{dot(a['pnl'])}\u00a0{roi:+.2f}%"), f"\n{a['pnl']:+.2f}"]])
             blocks.append(r_table(["Acc", f"{name} · giá", "ROI · PnL"], D_, [None, None, "right"]))
     flush(first)

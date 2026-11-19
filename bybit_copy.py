@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.34.2"
+VERSION = "1.35.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.35.0", ["/status bỏ dòng 📊 Trạng thái — 🟢 ĐANG CHẠY (chỉ báo khi bot đang dừng)",
+                "Có từ 2 position trở lên: hàng ô check ✅ EVAA ⬜ CROSS … ở đầu tin — bấm để hiện / ẩn bảng của từng coin (hiện 1, nhiều hay ẩn hết). Tool nhớ lựa chọn; coin mới mở luôn hiện"]),
     ("1.34.2", ["Position History: bảng chi tiết từng acc ghi PnL (USDT) to ở trên, ROI % nhỏ ở dưới — giống cột PnL của bảng chính"]),
     ("1.34.1", ["Telegram lỗi Bad Gateway / Timeout liên tiếp: tool tự mở lại kết nối mới tới Telegram để bot nhanh hoạt động lại"]),
     ("1.34.0", ["Position History: mỗi position 1 dòng (gộp mọi lần đóng từ lúc mở tới lúc đóng hết, kể cả các acc chạm TP / SL vào các giờ khác nhau, hay đóng tay một phần trước)",
@@ -1936,6 +1938,9 @@ def rz_tidy():
     Coin dang mo ma chua co so lieu Realized -> tinh lai 1 lan tu lich su Bybit (vd ban cu chua tach theo coin)."""
     by = cfg.setdefault("realized", {"pnl": 0.0, "fee": 0.0, "n": 0}).setdefault("by", {})
     open_syms = {p["symbol"] for c in clients for p in (status.get(c.name) or {}).get("positions") or []}
+    if set(cfg.get("status_hide") or []) - open_syms:       # coin da dong -> lan mo lai luon hien
+        cfg["status_hide"] = sorted(set(cfg["status_hide"]) & open_syms)
+        save_cfg()
     gone = [k for k in by if k not in open_syms]
     for k in gone:
         by.pop(k)
@@ -2130,14 +2135,29 @@ def status_text():
 def status_blocks(title=None, stamp=None, photos=None):
     """photos = {coin: "attach://..."} -> anh Health Bar / nen 1m cua coin nam ngay tren bang cua coin do."""
     run = cfg["running"]
-    blocks = [r_head(f"{title or '📊 Trạng thái'} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}")]
+    blocks = [r_head(f"{title} — {'🟢 ĐANG CHẠY' if run else '🔴 ĐANG DỪNG'}")] if title else []
     G = status_groups()
     order = sorted(G, key=lambda k: -G[k]["val"])
+    hide = set(cfg.get("status_hide") or []) & {k[0] for k in G}
+    if len({k[0] for k in G}) >= 2 and not title:          # nhieu coin: o check chon coin nao hien bang
+        if botst.get("rich_buttons") is not False:
+            row = []
+            for sym in dict.fromkeys(k[0] for k in order):
+                row += [{"type": "button", "button": coin_check(sym, sym not in hide)}, " "]
+            blocks.append(r_par(row[:-1]))
+        if all(k[0] in hide for k in order):
+            blocks.append(r_par(f"👆 Đã ẩn cả {len(order)} position — bấm tên coin để hiện."))
+    else:
+        hide = set()
+    if not title and not run:
+        blocks.append(r_par("🔴 Bot đang dừng (/start để chạy lại)"))
     det = live.get("detail") or set()
     tgs = {t["symbol"]: t for t in chart_targets()} if G else {}
     for key in order:
         sym, sd = key
         g = G[key]
+        if sym in hide:
+            continue
         if live_view() in ("hb2", "hb3"):                  # Health Bar bang chu, khong can anh
             blocks.append(r_par(hb_parts(g, tgs.get(sym), sd, live_view())))
         elif photos and photos.get(sym):
@@ -2186,6 +2206,10 @@ def status_blocks(title=None, stamp=None, photos=None):
     if stamp:
         blocks.append(r_foot(stamp))
     return blocks
+
+
+def coin_check(sym, on):
+    return {"text": f"{'✅' if on else '⬜'} {coin_of(sym)}", "callback_data": f"vs:{sym}"}
 
 
 def acc_button(n, sym):
@@ -2607,7 +2631,10 @@ def live_kb():
     rows = []
     if botst.get("rich_buttons") is False:            # Telegram chua nhan nut trong tin -> nut "5 acc" o duoi
         G = status_groups()
-        rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items()][:4])
+        hide = set(cfg.get("status_hide") or [])
+        if len(G) >= 2:
+            rows.append([coin_check(sym, sym not in hide) for sym in dict.fromkeys(k[0] for k in G)][:4])
+        rows.append([acc_button(len(g["accs"]), sym) for (sym, _), g in G.items() if sym not in hide][:4])
     MAIN = [("close", "Close Order"), ("trail", "Trailing Stop"), ("tpsl", "Edit TP & SL"), ("tpl", "Order Template")]
     top = "tpsl" if menu in ("tp", "sl") else menu
     if not top:                                       # dang dong: moi nut chinh 1 dong
@@ -2967,6 +2994,15 @@ async def handle_callback(cq):
     if data == "no":
         live["confirm"] = None
         return await kb_answer(answer, "Đã huỷ")
+    if data.startswith("vs:"):                 # o check: hien / an bang cua 1 coin tren /status
+        sym = data[3:]
+        open_syms = {k[0] for k in status_groups()}
+        hide = set(cfg.get("status_hide") or []) & open_syms
+        hide.symmetric_difference_update({sym})
+        cfg["status_hide"] = sorted(hide)
+        save_cfg()
+        asyncio.create_task(answer())
+        return await edit_now()
     if data.startswith("dt"):                  # mo / dong bang chi tiet tung acc cua 1 coin
         sym = data[3:]
         det = set(live.get("detail") or set())

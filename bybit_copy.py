@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.36.0"
+VERSION = "1.36.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.36.1", ["Chống bị Telegram khoá bot nhiều giờ: /status chỉ tự cập nhật theo nhịp trong /setting khi bạn đang dùng; 15 phút không gõ / bấm gì thì chậm lại 60s/lần, sau 2 giờ còn 5 phút/lần (dòng Last Update ghi rõ). Gõ /status hoặc bấm nút bất kỳ dưới tin là nhanh lại ngay"]),
     ("1.36.0", ["/per có nút 🏆 WSOT: P&L% của từng acc theo công thức WSOT 2026 Bybit công bố — P&L% = Profit ÷ (Vốn đầu + Nạp), Profit = Equity (gồm PnL đang mở) − Vốn đầu + Rút − Nạp, tính từ 13/11 17:00; xếp hạng giữa các acc và dòng tổng",
                 "Vốn đầu, nạp, rút lấy từ nhật ký ví USDT trên Bybit bằng API của từng acc (không cần đăng nhập web, không cần API tài khoản chính)",
                 "Nút 📐 Hiệu chỉnh theo số WSOT: gõ P&L% đang hiện trên trang WSOT → tool tính lại Vốn đầu để số sau này khớp với Bybit"]),
@@ -2846,6 +2847,8 @@ async def handle_callback(cq):
         return await answer("Bạn không có quyền dùng bot này", True)
     data = cq.get("data") or ""
     mid = (cq.get("message") or {}).get("message_id")
+    if mid and mid == live.get("mid"):
+        live["seen"] = time.time()             # vua thao tac -> /status tu cap nhat nhanh lai
     if data == "noop":
         return await answer()
     if data.startswith("hx:"):                 # Position History: mo / dong chi tiet 1 lenh
@@ -3149,8 +3152,23 @@ def view_buttons():
             for k, t in (("c1", "1m 📊"), ("hb", "Bar v1"), ("hb2", "Bar v2"))]
 
 
+IDLE_SLOW, IDLE_SLOWER = 15 * 60, 2 * 3600     # khong thao tac 15 phut -> 60s/lan; 2 gio -> 5 phut/lan
+
+
+def live_every():
+    """Nhip sua tin /status: theo /setting khi dang dung; tu cham lai khi lau khong thao tac
+    (sua tin lien tuc ca ngay de bi Telegram khoa bot hang gio)."""
+    idle = time.time() - max(live.get("seen") or 0, live.get("start") or 0)
+    base = refresh_s() if idle < IDLE_SLOW else 60 if idle < IDLE_SLOWER else 300
+    if time.time() < live.get("every_until", 0):
+        base = max(base, live.get("every", base))
+    return base
+
+
 def live_stamp():
-    return f"Last Update: {datetime.now().strftime('%H:%M:%S')}"
+    e = live_every() if live.get("mid") else refresh_s()
+    tail = "" if e <= refresh_s() else f" · ⏳ tự cập nhật {e}s/lần (bấm nút bất kỳ để nhanh lại)"
+    return f"Last Update: {datetime.now().strftime('%H:%M:%S')}{tail}"
 
 
 def live_stop(why=""):
@@ -3229,7 +3247,7 @@ async def start_live(chat, user_mid=None):
     mid, rich = await _send_rich(chat, status_text() + "\n" + live_stamp(), status_blocks(stamp=live_stamp()), live_kb(),
                                  rebuild=lambda: (status_blocks(stamp=live_stamp()), live_kb()))
     if mid:
-        live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, photo_fail=0, photo_off_until=0,
+        live.update(chat=chat, mid=mid, rich=rich, t=time.time(), wait=0.0, photo_fail=0, photo_off_until=0, start=time.time(),
                     sig=json.dumps([status_blocks(), live_kb()], ensure_ascii=False) + "|0")   # "|0": chua kem bieu do
         cfg["live_msg"] = [chat, mid, rich]
         save_cfg()
@@ -3318,14 +3336,14 @@ async def live_edit(chat, mid, rich, final=False):
 async def live_loop():
     lm = cfg.get("live_msg")
     if lm:                             # tiep tuc sau khi tool khoi dong lai / update
-        live.update(chat=lm[0], mid=lm[1], rich=bool(lm[2]))
+        live.update(chat=lm[0], mid=lm[1], rich=bool(lm[2]), start=time.time())
     while True:
         await asyncio.sleep(1)
         try:
             if not live["mid"] or not cfg["bot_token"]:
                 continue
             now = time.time()
-            every = live.get("every", refresh_s()) if now < live.get("every_until", 0) else refresh_s()
+            every = live_every()
             if now < live["wait"] or now - live["t"] < every:
                 continue
             if live.get("confirm") and live["confirm"][1] < now:

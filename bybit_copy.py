@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.36.2"
+VERSION = "1.36.3"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.36.3", ["/status tự cập nhật 3s/lần trong 1 giờ sau khi mở lệnh thành công (/buy, /sell, /buyall…), sau đó 10s/lần; không còn position nào thì không tự sửa nữa (chỉ sửa khi số liệu thay đổi)",
+                "/setting: chọn nhịp 1 giờ đầu (3 / 5 / 10s) và nhịp sau 1 giờ (10 / 30 / 60s); bỏ mục Chậm lại khi không thao tác"]),
     ("1.36.2", ["/status chỉ tự cập nhật nhanh (theo Auto Refresh) khi đang có position; không có position thì 5 phút/lần",
                 "Chế độ tự chậm lại khi không thao tác chuyển vào /setting → 😴 Chậm lại khi không thao tác (mặc định Tắt)"]),
     ("1.36.1", ["Chống bị Telegram khoá bot nhiều giờ: /status chỉ tự cập nhật theo nhịp trong /setting khi bạn đang dùng; 15 phút không gõ / bấm gì thì chậm lại 60s/lần, sau 2 giờ còn 5 phút/lần (dòng Last Update ghi rõ). Gõ /status hoặc bấm nút bất kỳ dưới tin là nhanh lại ngay"]),
@@ -211,7 +213,8 @@ DEFAULT_CFG = {
     "allin_lev": "",                # don bay /lev cho moi lenh: "" chua dat | so | "max"
     "channel_id": "", "channel_title": "",
     "bot_token": "", "bot_owner_id": "",
-    "refresh": 5,
+    "refresh": 3,                   # giay / lan sua /status trong 1 gio dau sau khi mo lenh
+    "refresh_slow": 10,             # giay / lan sua /status sau do
     "plans": {},                    # Order Template dang chay: {"Acc1:EVAAUSDT": {...}} (nho lai khi khoi dong lai)
     "view": "hb2",                  # kieu hien thi /status: c1 (chart 1m) / hb (Bar v1 anh) / hb2 (Bar v2) / hb3 (Bar v3)                   # giay giua 2 lan tu cap nhat noi dung (/status, Health Bar, chart): 3 / 5 / 10
     "update_url": DEFAULT_UPDATE_URL,
@@ -251,6 +254,9 @@ def load_cfg():
             log(f"Lỗi đọc config.json: {e}")
     if not str(cfg.get("update_url") or "").strip():
         cfg["update_url"] = DEFAULT_UPDATE_URL
+    if not cfg.get("refresh_v2"):          # 1.36.3: mac dinh moi 3s (1 gio dau) -> 10s
+        cfg.update(refresh=3, refresh_slow=10, refresh_v2=True)
+        save_cfg()
     had = [cfg.pop(k, None) for k in ("main_key", "main_secret")]
     if any(x is not None for x in had):    # ban 1.23.0 co the da luu API key tai khoan chinh -> xoa han
         save_cfg()
@@ -918,28 +924,23 @@ def setting_blocks(note=None, page=None):
     blocks = [r_head("⚙️ Setting"),
               r_table(["Mục", "Đang chọn"],
                       [["Hiển thị /status", B(f"{dict(VIEWS)[view]}")],
-                       ["Auto Refresh content", B(f"{cur}s / lần")],
-                       ["Chậm lại khi không thao tác", B("Bật" if cfg.get("idle_slow") else "Tắt")]], [None, "right"])]
+                       ["Tự cập nhật 1 giờ đầu sau khi mở lệnh", B(f"{cur}s / lần")],
+                       ["Tự cập nhật sau 1 giờ", B(f"{slow_s()}s / lần")]], [None, "right"])]
     if page == "view":
         blocks.append(r_par("Chọn kiểu hiển thị bảng /status:\n" +
                             "\n".join(f"• {t}: {VIEW_DESC[k]}" for k, t in VIEWS)))
         rows = [[{"text": ("✅ " if view == k else "") + f"{t} — {VIEW_DESC[k]}", "callback_data": f"v:{k}"}] for k, t in VIEWS]
     elif page == "rf":
-        blocks.append(r_par("Bao lâu cập nhật lại /status, Bar v1/v2/v3, chart 1m một lần.\n"
-                            "⚠️ 3s dễ bị Telegram giới hạn (khoá bot vài giờ) nếu để /status chạy lâu. Khuyên dùng 5s."))
+        blocks.append(r_par("Nhịp tự sửa /status (Bar, chart 1m) trong 1 giờ đầu sau khi mở lệnh thành công (/buy, /sell…). "
+                            "Sau 1 giờ tự chuyển sang nhịp chậm; không còn position thì không tự sửa."))
         rows = [[{"text": ("✅ " if cur == v else "") + f"{v}s", "callback_data": f"rf:{v}"} for v in REFRESH_CHOICES]]
-    elif page == "idle":
-        on = bool(cfg.get("idle_slow"))
-        blocks.append(r_par(f"/status chỉ tự cập nhật {cur}s/lần khi đang có position; không có position thì 5 phút/lần.\n"
-                            "Bật mục này để /status tự chậm lại khi bạn không gõ lệnh / bấm nút nào: sau 15 phút còn 60s/lần, "
-                            "sau 2 giờ còn 5 phút/lần. Gõ /status hoặc bấm nút bất kỳ dưới tin là nhanh lại ngay.\n"
-                            "⚠️ Giữ position nhiều giờ mà để Tắt: tin bị sửa liên tục cả ngày, dễ bị Telegram khoá bot vài giờ."))
-        rows = [[{"text": ("✅ " if not on else "") + f"Tắt — luôn {cur}s khi có position", "callback_data": "idle:0"}],
-                [{"text": ("✅ " if on else "") + "Bật — 15 phút → 60s, 2 giờ → 5 phút", "callback_data": "idle:1"}]]
+    elif page == "slow":
+        blocks.append(r_par("Nhịp tự sửa /status sau 1 giờ kể từ lần mở lệnh gần nhất. Chậm hơn = ít bị Telegram khoá bot hơn khi giữ lệnh lâu."))
+        rows = [[{"text": ("✅ " if slow_s() == v else "") + f"{v}s", "callback_data": f"rs:{v}"} for v in SLOW_CHOICES]]
     else:
         rows = [[{"text": f"🖥 Hiển thị /status: {dict(VIEWS)[view]}", "callback_data": "st:view"}],
-                [{"text": f"⏱ Auto Refresh content: {cur}s", "callback_data": "st:rf"}],
-                [{"text": f"😴 Chậm lại khi không thao tác: {'Bật' if cfg.get('idle_slow') else 'Tắt'}", "callback_data": "st:idle"}]]
+                [{"text": f"⏱ 1 giờ đầu sau khi mở lệnh: {cur}s", "callback_data": "st:rf"}],
+                [{"text": f"🐢 Sau 1 giờ: {slow_s()}s", "callback_data": "st:slow"}]]
     if page:
         rows.append([{"text": "⬅️ Quay lại", "callback_data": "st:"}])
     if note:
@@ -956,7 +957,7 @@ async def setting_show(chat, mid, note=None, page=None):
 
 async def setting_send(chat, umid=None):
     blocks, kb = setting_blocks()
-    mid, _ = await _send_rich(chat, f"⚙️ Setting\nAuto Refresh content: {refresh_s()}s / lần", blocks, kb)
+    mid, _ = await _send_rich(chat, f"⚙️ Setting\n/status: {refresh_s()}s/lần trong 1 giờ đầu, sau đó {slow_s()}s/lần", blocks, kb)
     track_new("setting", chat, mid, umid)
 
 
@@ -2501,7 +2502,7 @@ HELP_ITEMS = [
     ("/lev N", "Đặt đòn bẩy cố định cho /buy, /sell và lệnh kênh. Vd: /lev 10 — hoặc /lev max = max của coin"),
     ("/close", "Market close toàn bộ position, báo phí và PnL"),
     ("/update", "Cập nhật tool lên bản mới nhất và gửi change log"),
-    ("/setting", "Cài đặt: kiểu hiển thị /status (1m 📊 / Bar v1 / v2 / v3) và Auto Refresh 3s / 5s / 10s"),
+    ("/setting", "Cài đặt: kiểu hiển thị /status (1m 📊 / Bar v1 / v2 / v3) và nhịp tự cập nhật /status"),
     ("/help", "Hiện danh sách lệnh này"),
 ]
 HELP_TEXT = "📖 Các lệnh:\n" + "\n".join(f"{c} — {d}" for c, d in HELP_ITEMS)
@@ -2957,13 +2958,18 @@ async def handle_callback(cq):
                 log(f"chart /status: {type(e).__name__}: {str(e)[:100]}")
             await edit_now()                   # doi ngay tin /status dang chay
         return
-    if data in ("idle:0", "idle:1"):           # /setting -> cham lai khi khong thao tac
-        cfg["idle_slow"] = data == "idle:1"; save_cfg()
-        live["seen"] = time.time()
-        log(f"⚙️ Chậm lại khi không thao tác: {'Bật' if cfg['idle_slow'] else 'Tắt'} (từ Telegram)")
-        asyncio.create_task(answer("Đã lưu"))
+    if data.startswith("rs:"):                 # /setting -> nhip cham sau 1 gio
+        try:
+            v = int(data[3:])
+        except ValueError:
+            return await answer()
+        if v not in SLOW_CHOICES:
+            return await answer()
+        cfg["refresh_slow"] = v; save_cfg()
+        log(f"⚙️ /status sau 1 giờ: {v}s/lần (từ Telegram)")
+        asyncio.create_task(answer(f"Sau 1 giờ: {v}s"))
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
-        return await setting_show(chat, mid, f"✅ Chậm lại khi không thao tác: {'Bật' if cfg['idle_slow'] else 'Tắt'}.")
+        return await setting_show(chat, mid, f"✅ Sau 1 giờ: {v}s / lần.")
     if data.startswith("rf:"):                 # /setting -> Auto Refresh content
         try:
             v = int(data[3:])
@@ -2976,7 +2982,7 @@ async def handle_callback(cq):
         log(f"⚙️ Auto Refresh content: {v}s (từ Telegram)")
         asyncio.create_task(answer(f"Auto Refresh: {v}s"))
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
-        return await setting_show(chat, mid, f"✅ Auto Refresh: {v}s / lần.")
+        return await setting_show(chat, mid, f"✅ 1 giờ đầu sau khi mở lệnh: {v}s / lần.")
     if data in ("cc", "ccm"):
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         if data == "cc":
@@ -3147,15 +3153,25 @@ async def handle_callback(cq):
             send(live["chat"] or cfg["bot_owner_id"], "✂️ " + msg)
 
 REFRESH_CHOICES = (3, 5, 10)
+SLOW_CHOICES = (10, 30, 60)
+FAST_FOR = 3600            # sua nhanh trong 1 gio sau lan mo lenh gan nhat
+
+
+def slow_s():
+    try:
+        v = int(float(cfg.get("refresh_slow") or 10))
+    except (TypeError, ValueError):
+        v = 10
+    return v if v in SLOW_CHOICES else 10
 
 
 def refresh_s():
     """Nhip tu cap nhat chung cho moi noi dung tu sua (/status, Bar v1, chart 1m) — chon trong /setting."""
     try:
-        v = int(float(cfg.get("refresh") or 5))
+        v = int(float(cfg.get("refresh") or 3))
     except (TypeError, ValueError):
-        v = 5
-    return v if v in REFRESH_CHOICES else 5
+        v = 3
+    return v if v in REFRESH_CHOICES else 3
 LIVE_BEAT = 60         # so lieu khong doi van sua moi 60s de thay gio cap nhat
 
 
@@ -3171,19 +3187,15 @@ def view_buttons():
             for k, t in (("c1", "1m 📊"), ("hb", "Bar v1"), ("hb2", "Bar v2"))]
 
 
-IDLE_SLOW, IDLE_SLOWER = 15 * 60, 2 * 3600     # khong thao tac 15 phut -> 60s/lan; 2 gio -> 5 phut/lan
 
 
 def live_every():
     """Nhip sua tin /status: theo /setting khi dang dung; tu cham lai khi lau khong thao tac
     (sua tin lien tuc ca ngay de bi Telegram khoa bot hang gio)."""
-    idle = time.time() - max(live.get("seen") or 0, live.get("start") or 0)
     if not has_pos():
-        base = 300                             # khong co position -> khong can cap nhat nhanh
-    elif cfg.get("idle_slow"):
-        base = refresh_s() if idle < IDLE_SLOW else 60 if idle < IDLE_SLOWER else 300
-    else:
-        base = refresh_s()
+        return None                            # khong co position -> khong tu sua (chi sua khi so lieu doi)
+    fast = time.time() - float(cfg.get("live_opened") or 0) < FAST_FOR
+    base = refresh_s() if fast else slow_s()
     if time.time() < live.get("every_until", 0):
         base = max(base, live.get("every", base))
     return base
@@ -3191,12 +3203,7 @@ def live_every():
 
 def live_stamp():
     e = live_every() if live.get("mid") else refresh_s()
-    if e <= refresh_s() or not live.get("mid"):
-        tail = ""
-    elif not has_pos():
-        tail = " · không có position — tự cập nhật 5 phút/lần"
-    else:
-        tail = f" · ⏳ tự cập nhật {e}s/lần (bấm nút bất kỳ để nhanh lại)"
+    tail = f" · {e}s/lần" if e and live.get("mid") else ""
     return f"Last Update: {datetime.now().strftime('%H:%M:%S')}{tail}"
 
 
@@ -3373,15 +3380,15 @@ async def live_loop():
                 continue
             now = time.time()
             every = live_every()
-            if now < live["wait"] or now - live["t"] < every:
+            if now < live["wait"] or now - live["t"] < (every or 30):
                 continue
             if live.get("confirm") and live["confirm"][1] < now:
                 live["confirm"] = None     # het han xac nhan -> tra lai hang nut %
             if busy["n"] and live.get("pngs"):
                 continue                   # dang vao/dong lenh: khong tai anh len luc nay
             sig = live_sig()
-            if sig == live["sig"] and now - live["t"] < LIVE_BEAT:
-                continue
+            if sig == live["sig"] and (every is None or now - live["t"] < LIVE_BEAT):
+                continue                       # khong co position: chi sua khi co gi thay doi
             async with live_lock():
                 if live_sig() != sig:      # nut vua bam doi tin trong luc cho -> tinh lai
                     sig = live_sig()
@@ -4499,6 +4506,8 @@ async def notify_order(text, opened, kb=None):
     try:
         await asyncio.sleep(0.8)               # cho Bybit ghi nhan position + TP/SL vua dat
         await asyncio.gather(*(refresh_one(c) for c in clients))
+        cfg["live_opened"] = time.time()       # vua mo lenh -> /status sua nhanh trong 1 gio
+        save_cfg()
         await start_live(chat)
     except Exception as e:
         log(f"⚠️ Không gửi được bảng /status sau lệnh: {type(e).__name__}: {str(e)[:100]}")

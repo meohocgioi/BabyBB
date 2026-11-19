@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.35.1"
+VERSION = "1.36.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.36.0", ["/per có nút 🏆 WSOT: P&L% của từng acc theo công thức WSOT 2026 Bybit công bố — P&L% = Profit ÷ (Vốn đầu + Nạp), Profit = Equity (gồm PnL đang mở) − Vốn đầu + Rút − Nạp, tính từ 13/11 17:00; xếp hạng giữa các acc và dòng tổng",
+                "Vốn đầu, nạp, rút lấy từ nhật ký ví USDT trên Bybit bằng API của từng acc (không cần đăng nhập web, không cần API tài khoản chính)",
+                "Nút 📐 Hiệu chỉnh theo số WSOT: gõ P&L% đang hiện trên trang WSOT → tool tính lại Vốn đầu để số sau này khớp với Bybit"]),
     ("1.35.1", ["Position History: nguồn TP / SL ghi \"Lệnh buy\" thay cho \"/buy\" (tránh bấm nhầm thành gửi lệnh /buy)"]),
     ("1.35.0", ["/status bỏ dòng 📊 Trạng thái — 🟢 ĐANG CHẠY (chỉ báo khi bot đang dừng)",
                 "Có từ 2 position trở lên: hàng ô check ✅ EVAA ⬜ CROSS … ở đầu tin — bấm để hiện / ẩn bảng của từng coin (hiện 1, nhiều hay ẩn hết). Tool nhớ lựa chọn; coin mới mở luôn hiện"]),
@@ -2854,10 +2857,19 @@ async def handle_callback(cq):
         return await per_edit((cq.get("message") or {}).get("chat", {}).get("id") or cfg["bot_owner_id"], mid, "h")
     if data == "ph" or data.startswith("pf:"):
         kind = "h" if data == "ph" else data[3:]
-        if kind not in ("d", "w", "m", "h"):
+        if kind not in ("d", "w", "m", "h", "ws"):
             return await answer()
         await answer("Đang tải…")
         return await per_edit((cq.get("message") or {}).get("chat", {}).get("id") or cfg["bot_owner_id"], mid, kind)
+    if data in ("wscal", "wsreset"):           # WSOT: hieu chinh Von dau theo so tren trang WSOT
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        if data == "wsreset":
+            cfg.pop("wsot_init", None); cfg.pop("wsot_cal", None); save_cfg()
+            await answer("Đã bỏ hiệu chỉnh")
+            return await per_edit(chat, mid, "ws")
+        drop_inputs(chat)
+        asyncio.create_task(answer())
+        return await wsot_ask(chat, mid)
     if data.startswith("om:"):
         try:
             _, sd, coin, tp, sl, ts = data.split(":")
@@ -3185,7 +3197,7 @@ def track_add(key, chat, *mids):
 
 def drop_inputs(chat, keep=None):
     """Bam sang nut khac -> xoa tin hoi dang treo (Custom Trailing / Custom TP-SL / Close Custom Size) va huy o nhap."""
-    for k, groups in (("ctr", ("ctr",)), ("ctp", ("ctp", "ctp_confirm")), ("cc", ("cc",))):
+    for k, groups in (("ctr", ("ctr",)), ("ctp", ("ctp", "ctp_confirm")), ("cc", ("cc",)), ("wsc", ("wsc",))):
         if k == keep:
             continue
         live.pop(k, None)
@@ -3198,9 +3210,9 @@ def drop_inputs(chat, keep=None):
 
 def clear_prompts(chat):
     """Gui /status moi -> xoa cac tin hoi / canh bao / bang template dang treo va huy o nhap dang cho."""
-    for k in ("ctp", "cc", "ctr", "ctp_pending", "tpl_pending"):
+    for k in ("ctp", "cc", "ctr", "wsc", "ctp_pending", "tpl_pending"):
         live.pop(k, None)
-    for g in ("ctp", "ctp_confirm", "cc", "ctr", "tpl_confirm", "tpl_info"):
+    for g in ("ctp", "ctp_confirm", "cc", "ctr", "wsc", "tpl_confirm", "tpl_info"):
         if (cfg.get("msg_track") or {}).get(g, {}).get("mids"):
             track_new(g, chat)
 
@@ -3966,7 +3978,183 @@ def _rec(it):
 
 def per_kb(sel):
     row = [{"text": ("• " if sel == k else "") + v, "callback_data": f"pf:{k}"} for k, v in PER_LABEL.items()]
-    return {"inline_keyboard": [row, [{"text": ("• " if sel == "h" else "") + "Position History", "callback_data": "ph"}]]}
+    rows = [row, [{"text": ("• " if sel == "h" else "") + "Position History", "callback_data": "ph"},
+                  {"text": ("• " if sel == "ws" else "") + "🏆 WSOT", "callback_data": "pf:ws"}]]
+    if sel == "ws":
+        rows.append([{"text": "📐 Hiệu chỉnh theo số WSOT", "callback_data": "wscal"}])
+        if cfg.get("wsot_init"):
+            rows.append([{"text": "↺ Bỏ hiệu chỉnh", "callback_data": "wsreset"}])
+    return {"inline_keyboard": rows}
+
+
+# ===== WSOT 2026: P&L% tung acc, tinh theo cong thuc Bybit cong bo =====
+# P&L% = Profit / (Initial equity + Total deposits) x 100%
+# Profit = Final equity (gom PnL dang mo) - Initial equity + Withdrawals - Deposits
+WSOT_START_MS = 1794564000000           # 13/11/2026 10:00 UTC = 17:00 gio VN (main competition)
+WSOT_END_MS = 1796205600000             # 02/12/2026 10:00 UTC
+WS_DEP = ("TRANSFER_IN", "BONUS", "AIRDROP")
+WS_WD = ("TRANSFER_OUT", "BONUS_RECOLLECT")
+_ws_cache = {}
+
+
+async def ws_flows(c):
+    """Tu nhat ky vi USDT (transaction log) tu luc WSOT bat dau: balance truoc giao dich dau tien, tong nap, tong rut."""
+    st = _ws_cache.get(c.name)
+    if st and time.time() - st["t"] < 30:
+        return st
+    st = st or {"t": 0, "init": None, "init_t": None, "dep": 0.0, "wd": 0.0, "from": WSOT_START_MS, "ids": set()}
+    now = min(int(time.time() * 1000) + time_offset, WSOT_END_MS)
+    new, t = [], st["from"]
+    while t < now:
+        e, cursor = min(t + WEEK_MS - 1000, now), ""
+        for _ in range(100):
+            p = {"accountType": "UNIFIED", "currency": "USDT", "startTime": str(t), "endTime": str(e), "limit": "50"}
+            if cursor:
+                p["cursor"] = cursor
+            r = await c.req("GET", "/v5/account/transaction-log", p)
+            if r.get("retCode") != 0:
+                raise RuntimeError(str(r.get("retMsg")))
+            new += [x for x in r["result"]["list"] if x.get("id") not in st["ids"]]
+            cursor = r["result"].get("nextPageCursor") or ""
+            if not cursor:
+                break
+        t = e + 1
+    new.sort(key=lambda x: (int(x.get("transactionTime") or 0), str(x.get("id"))))
+    for x in new:
+        st["ids"].add(x.get("id"))
+        ch = float(x.get("change") or 0)
+        if st["init"] is None:                 # balance ngay truoc giao dich dau tien = balance luc bat dau
+            st["init"] = float(x.get("cashBalance") or 0) - ch
+            st["init_t"] = int(x.get("transactionTime") or 0)
+        if x.get("type") in WS_DEP:
+            st["dep"] += ch
+        elif x.get("type") in WS_WD:
+            st["wd"] += -ch
+    st["from"] = max(WSOT_START_MS, now - 600000)          # lan sau chi lay 10 phut gan nhat (bo trung theo id)
+    st["t"] = time.time()
+    _ws_cache[c.name] = st
+    return st
+
+
+def ws_calc(c, fl):
+    """-> dict so lieu WSOT cua 1 acc (hoac None neu chua co equity)."""
+    e = (status.get(c.name) or {}).get("equity")
+    if e is None:
+        return None
+    cal = (cfg.get("wsot_init") or {}).get(c.name)
+    init = cal if cal is not None else (fl["init"] if fl["init"] is not None else e)
+    profit = e - init + fl["wd"] - fl["dep"]
+    base = init + fl["dep"]
+    return {"acc": c.name, "eq": e, "init": init, "dep": fl["dep"], "wd": fl["wd"], "profit": profit,
+            "pct": profit / base * 100 if base > 0 else 0.0, "cal": cal is not None}
+
+
+async def wsot_data():
+    async def one(c):
+        try:
+            return c, await ws_flows(c)
+        except Exception as e:
+            return c, e
+    return await asyncio.gather(*(one(c) for c in clients))
+
+
+async def wsot_view():
+    title = "🏆 WSOT 2026 — P&L%"
+    rows, errs = [], []
+    for c, fl in await wsot_data():
+        if isinstance(fl, Exception):
+            errs.append(f"{c.name}: ⚠️ {str(fl)[:80]}")
+            continue
+        x = ws_calc(c, fl)
+        if x:
+            rows.append(x)
+        else:
+            errs.append(f"{c.name}: chưa có số dư")
+    rows.sort(key=lambda x: -x["pct"])
+    medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"]
+    T, R = [title], []
+    for i, x in enumerate(rows):
+        sub = f"\nVốn {x['init']:.2f}" + (f"\nNạp {x['dep']:.2f}" if x["dep"] else "") + (f"\nRút {x['wd']:.2f}" if x["wd"] else "")
+        R.append([[B(f"{medal[i] if i < len(medal) else ''} {x['acc']}"), sub],
+                  B(f"{dot(x['pct'])}\u00a0{x['pct']:+.2f}%"),
+                  [B(f"{x['profit']:+.2f}"), f"\nEq {x['eq']:.2f}"]])
+        T.append(f"{i + 1}. {x['acc']}: {x['pct']:+.2f}% | Profit {x['profit']:+.2f} | vốn {x['init']:.2f} | nạp {x['dep']:.2f} | rút {x['wd']:.2f} | equity {x['eq']:.2f}")
+    if rows:
+        tp = sum(x["profit"] for x in rows)
+        tb = sum(x["init"] + x["dep"] for x in rows)
+        tpct = tp / tb * 100 if tb > 0 else 0.0
+        R.append([B(f"Tổng {len(rows)} acc"), B(f"{dot(tpct)}\u00a0{tpct:+.2f}%"), B(f"{tp:+.2f}")])
+        T.append(f"Tổng: {tpct:+.2f}% | Profit {tp:+.2f}")
+    blocks = [r_head(title)]
+    if R:
+        blocks.append(r_table(["Acc", "P&L%", "Profit"], R, [None, "right", "right"]))
+    for e in errs:
+        blocks.append(r_par(e))
+        T.append(e)
+    cal = cfg.get("wsot_cal")
+    note = ("P&L% = Profit ÷ (Vốn đầu + Nạp) · Profit = Equity hiện tại (gồm PnL đang mở) − Vốn đầu + Rút − Nạp · "
+            "tính từ 13/11 17:00 (giờ VN) · Vốn đầu "
+            + (f"đã hiệu chỉnh theo số WSOT lúc {cal}" if cal and any(x["cal"] for x in rows)
+               else "= balance lúc bắt đầu (tool tự tính, có thể lệch số Bybit — bấm 📐 để hiệu chỉnh)")
+            + f" · Last Update: {datetime.now().strftime('%H:%M:%S')}")
+    blocks.append(r_foot(note))
+    T.append(note)
+    return "\n".join(T), blocks
+
+
+def wsot_parse(txt, n):
+    """'32.51 42.38 27.38 41.73 76.10' (theo thu tu acc) hoac nhieu dong 'neko5 76.10%' (so cuoi ten = so thu tu acc)."""
+    lines = [l for l in re.split(r"[\n;]+", (txt or "").replace(",", ".")) if l.strip()]
+    vals = {}
+    end = r"(-?\d+(?:\.\d+)?)\s*%?\s*$"
+    if len(lines) >= n and all(re.search(end, l) for l in lines):
+        for i, l in enumerate(lines):
+            v = float(re.search(end, l).group(1))
+            m = re.match(r"\s*[^\d\s]+\s*(\d+)\s+", l)
+            vals[int(m.group(1)) if m else i + 1] = v
+    else:
+        nums = re.findall(r"-?\d+(?:\.\d+)?", txt or "")
+        if len(nums) != n:
+            return None
+        vals = {i + 1: float(x) for i, x in enumerate(nums)}
+    if sorted(vals) != list(range(1, n + 1)):
+        return None
+    return [vals[i] for i in range(1, n + 1)]
+
+
+async def wsot_ask(chat, per_mid, warn=None):
+    eg = " ".join(f"{10 * (i + 1):.2f}" for i in range(len(clients)))
+    text = ((("⚠️ " + warn + "\n") if warn else "") +
+            f"📐 Hiệu chỉnh WSOT — gõ P&L% đang hiện trên trang WSOT của {len(clients)} acc, theo thứ tự "
+            + ", ".join(c.name for c in clients) + f"\nVd: {eg}")
+    blocks = prompt_blocks("📐 Hiệu chỉnh WSOT",
+                           [[f"{i + 1}", B(c.name)] for i, c in enumerate(clients)],
+                           [[eg, "P&L% từng acc, theo thứ tự trên"],
+                            ["neko1 32.51%\nneko2 42.38%…", "Mỗi dòng 1 acc, số cuối tên = thứ tự acc"]],
+                           "Tool dùng số này để tính lại Vốn đầu của từng acc (gồm cả PnL đang mở lúc bắt đầu), "
+                           "từ đó P&L% sau này sát với Bybit. Nên nhập lúc ít position đang mở.", warn)
+    rm, _ = await _send_rich(chat, text, blocks, {"force_reply": True, "input_field_placeholder": eg})
+    live["wsc"] = {"t": time.time(), "mid": per_mid}
+    track_new("wsc", chat, rm)
+
+
+async def wsot_calibrate(chat, vals):
+    """Tu P&L% chinh thuc -> Von dau: P = (E - I + W - D) / (I + D)  =>  I = (E + W) / (1 + P) - D."""
+    out, init = [], {}
+    for (c, fl), v in zip(await wsot_data(), vals):
+        e = (status.get(c.name) or {}).get("equity")
+        if isinstance(fl, Exception) or e is None:
+            out.append(f"❌ {c.name}: chưa lấy được số liệu — giữ nguyên")
+            continue
+        i = (e + fl["wd"]) / (1 + v / 100) - fl["dep"]
+        init[c.name] = i
+        out.append(f"✅ {c.name}: {v:+.2f}% → Vốn đầu {i:.2f} (equity {e:.2f})")
+    if init:
+        cfg.setdefault("wsot_init", {}).update(init)
+        cfg["wsot_cal"] = datetime.now().strftime("%H:%M %d/%m")
+        save_cfg()
+    log("📐 Hiệu chỉnh WSOT: " + " | ".join(out))
+    return "📐 Đã hiệu chỉnh WSOT\n" + "\n".join(out)
 
 
 def per_view(kind, data, desc):
@@ -4100,6 +4288,9 @@ async def per_build(kind, opened=None):
             return c.name, await fetch_closed(c, start)
         except Exception as e:
             return c.name, e
+    if kind == "ws":
+        text, blocks = await wsot_view()
+        return text, blocks, per_kb(kind), None
     if kind == "h":
         now = int(time.time() * 1000) + time_offset
         data = await asyncio.gather(*(one(c, now - WEEK_MS) for c in clients))
@@ -4385,6 +4576,19 @@ async def handle_update(u):
                 return
             if chat != str(cfg["bot_owner_id"]).strip():
                 send(chat, f"Chat ID của bạn: {chat}\nNhập số này vào ô 'Chat ID chủ bot' trên tool.")
+                return
+            wsc = live.get("wsc")
+            if wsc and not cmd.startswith("/") and time.time() - wsc["t"] < CTP_TTL:
+                v = wsot_parse(m.get("text"), len(clients))
+                asyncio.create_task(tg_delete(chat, [m.get("message_id")]))
+                if not v:
+                    await wsot_ask(chat, wsc["mid"], f"Cần đúng {len(clients)} số P&L% (vd 32.51 42.38 …). Gõ lại.")
+                    return
+                live.pop("wsc", None)
+                track_new("wsc", chat)
+                send(chat, await wsot_calibrate(chat, v))
+                if wsc.get("mid"):
+                    await per_edit(chat, wsc["mid"], "ws")
                 return
             ctr = live.get("ctr")
             if ctr and not cmd.startswith("/") and time.time() - ctr["t"] < CTP_TTL and \

@@ -4,10 +4,12 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.32.2"
+VERSION = "1.33.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.33.0", ["/status: mỗi coin có dòng Realized ngay trong bảng của coin đó (số acc đã đóng do TP / SL / đóng tay, PnL đã gồm phí); bảng Realized PnL tổng ở cuối chỉ hiện khi có từ 2 coin",
+                "Dòng TP / SL: lãi / lỗ dự kiến tính theo TP / SL riêng của từng acc; các acc đặt khác nhau (vd TP v2) thì hiện khoảng giá, vd TP 0.02077–0.02115 (+10…+12%)"]),
     ("1.32.2", ["/status: dòng Template chưa áp dụng ghi gọn là None; dòng Trailing bỏ chữ (sàn); SL / TP đặt đúng entry hiện (= entry) thay cho (-0.00%)"]),
     ("1.32.1", ["Tin hướng dẫn Custom TP-SL, Trailing Stop, Close Custom Size và cảnh báo khớp lệnh dùng chung 1 kiểu: tiêu đề, bảng thông tin, bảng Cách gõ (chữ mẫu dạng code), ghi chú nhỏ ở cuối"]),
     ("1.32.0", ["Enter custom TP-SL: dấu của SL theo hướng giá so với entry — 50 +5 = SL lời (trên entry 5%), 50 -5 hoặc 50 5 = SL lỗ (dưới entry 5%), 50 0 = SL hoà vốn"]),
@@ -1846,6 +1848,14 @@ def add_realized(rows):
     rz["n"] += 1
     if any(x.get("est") for x in done):
         rz["est"] = True
+    by = rz.setdefault("by", {})                # theo tung coin -> hien ngay trong bang cua coin do
+    for x in done:
+        b = by.setdefault(x.get("symbol") or "?", {"pnl": 0.0, "fee": 0.0, "accs": [], "est": False})
+        b["pnl"] += x["pnl"]
+        b["fee"] += x["fee"] if x.get("fee") is not None else 0.0
+        if x.get("acc") and x["acc"] not in b["accs"]:
+            b["accs"].append(x["acc"])
+        b["est"] = b["est"] or bool(x.get("est"))
     save_cfg()
 
 
@@ -2008,6 +2018,10 @@ def status_blocks(title=None, stamp=None, photos=None):
               [B(f"{side_vn(sd)} {coin_of(sym)}"), f" {lv}\nSize {g['val']:.0f}\nEntry {num(g['val'] / g['qty'])}"],
               B(f"{dot(g['pnl'])}\u00a0{g['pnl']:+.2f}")],
              [B("Fee"), "", B(f"{g['fee']:.2f}")]]
+        rb = ((cfg.get("realized") or {}).get("by") or {}).get(sym)
+        if rb:                                             # phan da dong (TP / SL / dong tay) cua coin nay
+            S.insert(1, [B("Realized"), f"{len(rb['accs'])} acc đã đóng" + (" (ước tính)" if rb.get("est") else "\n(đã gồm phí)"),
+                         B(f"{dot(rb['pnl'])}\u00a0{rb['pnl']:+.2f}")])
         blocks.append(r_table(STATUS_HEAD, S, STATUS_ALIGN))
         if sym in det:
             R = []
@@ -2034,9 +2048,11 @@ def status_blocks(title=None, stamp=None, photos=None):
     elif not G and not clients:
         blocks.append(r_par("Chưa cài sub account nào."))
     rl = realized_lines()
-    if rl:
+    by = (cfg.get("realized") or {}).get("by") or {}
+    shown = {k[0] for k in G}
+    if rl and (len(by) >= 2 or not by or any(k not in shown for k in by)):
         rz = cfg["realized"]
-        blocks.append(r_table(["Realized PnL", "USDT"],
+        blocks.append(r_table(["Realized PnL tổng" if len(by) >= 2 else "Realized PnL", "USDT"],
                               [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
                                 B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
                                ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
@@ -2091,12 +2107,22 @@ def hb_parts(g, tg, sd, style="hb2"):
             parts += [f"{icon} {lab} chưa đặt"]
             continue
         exp = qty * (lv - entry) * d - g["fee"] - qty * lv * TAKER_FEE
+        each = [(float(p["size"]), p["avg"], float(p.get(key) or 0), p.get("fee", 0) or 0)
+                for _, p in acc_positions(tg["symbol"]) if p["side"] == sd]
+        rng = ""
+        if each and all(x[2] > 0 for x in each):           # moi acc 1 muc rieng (vd TP v2) -> cong tung acc
+            exp = sum(q * (l - e) * d - f - q * l * TAKER_FEE for q, e, l, f in each)
+            lo, hi = min(x[2] for x in each), max(x[2] for x in each)
+            if num(lo) != num(hi):
+                pc = lambda v: f"{(v / entry - 1) * 100:+.2f}".rstrip("0").rstrip(".")
+                a, b = (lo, hi) if d > 0 else (hi, lo)
+                rng = f"{icon} {lab} {num(a)}–{num(b)} ({pc(a)}…{pc(b)}%) "
         span = (lv - entry) * d if key == "tp" else (entry - lv) * d
         moved = (price - entry) * d if key == "tp" else (entry - price) * d
         frac = clamp(moved / span) if span > 0 else 0.0
         n = int(round(frac * 10))
         mv = (lv / entry - 1) * 100 if entry else 0.0       # TP / SL cach entry bao nhieu % (theo gia)
-        parts += [f"{icon} {lab} {num(lv)} ({mv + 0:+.2f}%) " if round(mv, 2) else f"{icon} {lab} {num(lv)} (= entry) ", chip(f"{exp:+.2f}", exp >= 0),
+        parts += [rng or (f"{icon} {lab} {num(lv)} ({mv + 0:+.2f}%) " if round(mv, 2) else f"{icon} {lab} {num(lv)} (= entry) "), chip(f"{exp:+.2f}", exp >= 0),
                   "\n"] + (lambda b: b if isinstance(b, list) else [b])(hb_bar(frac, key == "tp", style))
     return parts
 

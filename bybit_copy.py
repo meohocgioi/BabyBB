@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.36.3"
+VERSION = "1.36.4"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.36.4", ["/per khi Telegram đang giới hạn bot: gửi bảng chữ, không kèm biểu đồ (ảnh bị chặn lâu hơn tin chữ) — không còn mất cả tin trả lời"]),
     ("1.36.3", ["/status tự cập nhật 3s/lần trong 1 giờ sau khi mở lệnh thành công (/buy, /sell, /buyall…), sau đó 10s/lần; không còn position nào thì không tự sửa nữa (chỉ sửa khi số liệu thay đổi)",
                 "/setting: chọn nhịp 1 giờ đầu (3 / 5 / 10s) và nhịp sau 1 giờ (10 / 30 / 60s); bỏ mục Chậm lại khi không thao tác"]),
     ("1.36.2", ["/status chỉ tự cập nhật nhanh (theo Auto Refresh) khi đang có position; không có position thì 5 phút/lần",
@@ -4416,6 +4417,11 @@ async def per_send(chat, kind, user_mid=None):
 async def _per_send(chat, kind, user_mid=None):
     text, blocks, kb, png = await per_build(kind)
     photo_mid = None
+    if png and flood_wait() > 0:               # Telegram dang khoa gui anh / sua tin -> gui bang chu, khong kem bieu do
+        log(f"/per: Telegram đang giới hạn ({flood_wait():.0f}s) — gửi bảng không kèm biểu đồ")
+        png = None
+        if blocks and blocks[-1].get("type") == "footer":
+            blocks[-1] = r_foot(blocks[-1]["text"] + " · (tạm ẩn biểu đồ vì Telegram đang giới hạn bot)")
     if png:
         rich_on = cfg.get("widgets", True) and botst.get("rich") is not False
         if rich_on and botst.get("rich_photo") is not False:     # cach 1: anh nam ngay trong rich message
@@ -4434,14 +4440,20 @@ async def _per_send(chat, kind, user_mid=None):
                 track_new("per", chat, pm, user_mid)
                 return
             desc = str(r.get("description"))
-            log(f"/per: Telegram không nhận ảnh trong tin ({desc[:120]}) — gửi biểu đồ thành ảnh riêng phía trên bảng")
+            if "Too Many Requests" in desc:    # bi gioi han -> bo bieu do, gui bang chu ngay (khong gui them anh)
+                log("/per: Telegram giới hạn gửi ảnh — gửi bảng không kèm biểu đồ")
+                png = None
+                await asyncio.sleep(1)
+            else:
+                log(f"/per: Telegram không nhận ảnh trong tin ({desc[:120]}) — gửi biểu đồ thành ảnh riêng phía trên bảng")
             if "photo" in desc.lower() and "block" in desc.lower():
                 botst["rich_photo"] = False    # chi tat han khi Telegram noi ro khong ho tro anh trong rich message
-        r = await bot_form("sendPhoto", {"chat_id": str(chat)}, {"photo": png})   # cach 2: anh rieng, ngay tren bang
-        if r.get("ok"):
-            photo_mid = (r.get("result") or {}).get("message_id")
-        else:
-            log(f"⚠️ Không gửi được biểu đồ: {str(r.get('description'))[:100]}")
+        if png:
+            r = await bot_form("sendPhoto", {"chat_id": str(chat)}, {"photo": png})   # cach 2: anh rieng, ngay tren bang
+            if r.get("ok"):
+                photo_mid = (r.get("result") or {}).get("message_id")
+            else:
+                log(f"⚠️ Không gửi được biểu đồ: {str(r.get('description'))[:100]}")
     mid, _ = await _send_rich(chat, text, blocks, kb)
     if not mid:
         log("⚠️ /per: không gửi được bảng — thử gửi bản chữ")

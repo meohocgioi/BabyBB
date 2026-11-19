@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.35.0"
+VERSION = "1.35.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.35.1", ["Position History: nguồn TP / SL ghi \"Lệnh buy\" thay cho \"/buy\" (tránh bấm nhầm thành gửi lệnh /buy)"]),
     ("1.35.0", ["/status bỏ dòng 📊 Trạng thái — 🟢 ĐANG CHẠY (chỉ báo khi bot đang dừng)",
                 "Có từ 2 position trở lên: hàng ô check ✅ EVAA ⬜ CROSS … ở đầu tin — bấm để hiện / ẩn bảng của từng coin (hiện 1, nhiều hay ẩn hết). Tool nhớ lựa chọn; coin mới mở luôn hiện"]),
     ("1.34.2", ["Position History: bảng chi tiết từng acc ghi PnL (USDT) to ở trên, ROI % nhỏ ở dưới — giống cột PnL của bảng chính"]),
@@ -4065,7 +4066,9 @@ def history_view(data, limit=5, reasons=None, opened=None):
                 ts = tpsl_of(acc, g["symbol"], a["t"])
                 setup = ""
                 if ts:
-                    setup = (f"\n{ts['src']}" if ts.get("src") else "") + \
+                    src = str(ts.get("src") or "")
+                    src = ("Lệnh " + src[1:]) if src.startswith("/") else src      # "/buy" -> Telegram bien thanh link lenh
+                    setup = (f"\n{src}" if src else "") + \
                             f"\nTP {ts.get('tp') or '—'}\nSL {ts.get('sl') or '—'}"
                 why = " / ".join(sorted(a["why"]))
                 D_.append([[B(acc), f" x{a['lev']:g}{setup}"],

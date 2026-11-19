@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.34.0"
+VERSION = "1.34.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.34.1", ["Telegram lỗi Bad Gateway / Timeout liên tiếp: tool tự mở lại kết nối mới tới Telegram để bot nhanh hoạt động lại"]),
     ("1.34.0", ["Position History: mỗi position 1 dòng (gộp mọi lần đóng từ lúc mở tới lúc đóng hết, kể cả các acc chạm TP / SL vào các giờ khác nhau, hay đóng tay một phần trước)",
                 "Bấm mở 1 position: mỗi acc ghi TP / SL đang chạy (template TP v1 / TP v2 / Part-TP, Custom TP-SL, Edit TP/SL hay lệnh /buy…), mức TP / SL % từ entry và lý do đóng (TP / SL / Tool…)",
                 "Thông tin TP / SL từng acc được ghi lại từ bản này trở đi (các position đã đóng trước đó không có)"]),
@@ -2507,6 +2508,22 @@ async def bot_api(method, _timeout=8, _quiet=False, **params):
     return j
 
 
+def tg_reconnect():
+    """Mo lai ket noi toi Telegram (bo cac ket noi cu co the da treo sau loi mang / Bad Gateway)."""
+    global tg_http
+    old = tg_http
+    tg_http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=20, keepalive_timeout=90))
+
+    async def _close():
+        await asyncio.sleep(60)                # cho cac lenh dang chay tren ket noi cu xong
+        try:
+            await old.close()
+        except Exception:
+            pass
+    if old:
+        asyncio.create_task(_close())
+
+
 def flood_wait():
     """So giay con phai cho theo lan 429 gan nhat cua Telegram (0 neu khong bi gioi han)."""
     f = botst.get("flood")
@@ -4246,6 +4263,7 @@ async def tg_keepalive():
 
 async def bot_loop():
     offset = None
+    fails = 0
     while True:
         try:
             if not cfg["bot_token"]:
@@ -4263,8 +4281,14 @@ async def bot_loop():
                     if "conflict" in err.lower():
                         log("⚠️ Có 2 cửa sổ tool cùng chạy với 1 bot — tắt bớt 1 cửa sổ (chỉ để lại 1).")
                 botst.update(ok=False, err=err)
-                await asyncio.sleep(3)
+                if any(x in err for x in ("Timeout", "Gateway", "Connect", "Disconnected", "Server", "502", "504")):
+                    fails += 1
+                    if fails % 3 == 0:         # loi mang lien tiep -> mo ket noi moi toi Telegram
+                        log("🔄 Telegram chập chờn — mở lại kết nối tới Telegram")
+                        tg_reconnect()
+                await asyncio.sleep(3 if fails < 3 else 5)
                 continue
+            fails = 0
             if not botst["ok"] or botst["token"] != cfg["bot_token"]:
                 me = await bot_api("getMe", _quiet=True)
                 botst["name"] = "@" + str((me.get("result") or {}).get("username") or "?")

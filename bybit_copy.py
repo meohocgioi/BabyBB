@@ -4,10 +4,13 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.33.0"
+VERSION = "1.33.1"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.33.1", ["Realized PnL tách riêng từng position: bỏ bảng Realized PnL gộp ở cuối /status, mỗi coin có dòng Realized trong bảng của coin đó",
+                "Coin đang mở từ trước (chưa có số liệu riêng) được tool tự tính lại Realized từ lịch sử lệnh trên Bybit",
+                "Tin báo đóng lệnh ghi tổng cả position của từng coin, không gộp các coin"]),
     ("1.33.0", ["/status: mỗi coin có dòng Realized ngay trong bảng của coin đó (số acc đã đóng do TP / SL / đóng tay, PnL đã gồm phí); bảng Realized PnL tổng ở cuối chỉ hiện khi có từ 2 coin",
                 "Dòng TP / SL: lãi / lỗ dự kiến tính theo TP / SL riêng của từng acc; các acc đặt khác nhau (vd TP v2) thì hiện khoảng giá, vd TP 0.02077–0.02115 (+10…+12%)"]),
     ("1.32.2", ["/status: dòng Template chưa áp dụng ghi gọn là None; dòng Trailing bỏ chữ (sàn); SL / TP đặt đúng entry hiện (= entry) thay cho (-0.00%)"]),
@@ -1859,6 +1862,71 @@ def add_realized(rows):
     save_cfg()
 
 
+_rz_tried = set()
+
+
+def rz_tidy():
+    """Coin da dong het -> xoa Realized cua coin do (lan mo moi tinh lai tu 0).
+    Coin dang mo ma chua co so lieu Realized -> tinh lai 1 lan tu lich su Bybit (vd ban cu chua tach theo coin)."""
+    by = cfg.setdefault("realized", {"pnl": 0.0, "fee": 0.0, "n": 0}).setdefault("by", {})
+    open_syms = {p["symbol"] for c in clients for p in (status.get(c.name) or {}).get("positions") or []}
+    gone = [k for k in by if k not in open_syms]
+    for k in gone:
+        by.pop(k)
+    _rz_tried.intersection_update(open_syms)
+    if gone:
+        save_cfg()
+    for sym in open_syms - set(by) - _rz_tried:
+        _rz_tried.add(sym)
+        asyncio.create_task(rz_backfill(sym))
+
+
+async def rz_backfill(sym):
+    """Dung lai dong thoi gian lenh mo (order history) + lenh dong (closed-pnl) cua coin tren moi acc (7 ngay),
+    tim luc position cua coin bat dau (tong size tu 0 len) -> cong PnL cac lan dong tu luc do."""
+    try:
+        async def one(c):
+            ev = []
+            r = await c.req("GET", "/v5/order/history", {"category": "linear", "symbol": sym, "limit": "50"})
+            for o in ((r.get("result") or {}).get("list") or []):
+                q = float(o.get("cumExecQty") or 0)
+                if q > 0 and not o.get("reduceOnly") and not o.get("closeOnTrigger"):
+                    ev.append((int(o.get("updatedTime") or o.get("createdTime") or 0), q, None, c.name))
+            r = await c.req("GET", "/v5/position/closed-pnl", {"category": "linear", "symbol": sym, "limit": "100"})
+            if r.get("retCode") != 0:
+                raise RuntimeError(r.get("retMsg"))
+            for x in r["result"]["list"]:
+                ev.append((int(x.get("updatedTime") or x.get("createdTime") or 0), -float(x.get("closedSize") or 0),
+                           (float(x.get("closedPnl") or 0), float(x.get("openFee") or 0) + float(x.get("closeFee") or 0)),
+                           c.name))
+            return ev
+        res = await asyncio.gather(*(one(c) for c in clients))      # ca acc da dong het coin nay
+        ev = sorted(e for sub in res for e in sub)
+        if not ev:
+            return
+        big = max(abs(e[1]) for e in ev)
+        tot, start = 0.0, ev[0][0]
+        for t, dq, _, _ in ev:
+            before, tot = tot, max(0.0, tot + dq)
+            if before <= big * 1e-6 and tot > big * 1e-6:
+                start = t                      # tong size cac acc tu 0 len -> bat dau position hien tai
+        closes = [e for e in ev if e[2] is not None and e[0] >= start]
+        by = cfg.setdefault("realized", {"pnl": 0.0, "fee": 0.0, "n": 0}).setdefault("by", {})
+        if closes and sym not in by:
+            accs = []
+            for e in closes:
+                if e[3] not in accs:
+                    accs.append(e[3])
+            by[sym] = {"pnl": sum(e[2][0] for e in closes), "fee": sum(e[2][1] for e in closes),
+                       "accs": sorted(accs), "est": False}
+            save_cfg()
+            log(f"Realized {coin_of(sym)}: tính lại từ lịch sử Bybit {by[sym]['pnl']:+.2f} USDT ({len(accs)} acc)")
+            live_refresh_now()
+    except Exception as e:
+        _rz_tried.discard(sym)                 # thu lai lan sau
+        log(f"Realized {coin_of(sym)}: không tính lại được ({type(e).__name__}: {str(e)[:80]})")
+
+
 def has_pos():
     return any((status.get(c.name) or {}).get("positions") for c in clients)
 
@@ -1955,21 +2023,23 @@ def close_report(rows, prev_n=0, title=None, remain=None):
         blocks.append(r_foot(note))
     for e in errs:
         blocks.append(r_par(e))
-    rl = realized_lines(always=True)
-    if prev_n and rl and done:         # truoc do da dong 1 phan -> bao tong ca dot
-        rz = cfg["realized"]
-        T.append(f"Cả đợt (gồm các lần đóng một phần): {rl[1]} | {rl[2]}")
-        blocks.append(r_table(["Cả đợt (gồm các lần đóng một phần)", "USDT"],
-                              [[rl[1].split(" = ")[0], B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
-                               ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
+    by = (cfg.get("realized") or {}).get("by") or {}
+    RZ = []
+    for sym in sorted({x["symbol"] for x in done}):
+        b = by.get(sym)
+        now = sum(x["pnl"] for x in done if x["symbol"] == sym)
+        if b and abs(b["pnl"] - now) > 0.005:          # truoc do coin nay da dong 1 phan -> bao tong ca position
+            RZ.append([B(coin_of(sym)), f"{len(b['accs'])} acc · phí {b['fee']:.2f}", B(f"{dot(b['pnl'])}\u00a0{b['pnl']:+.2f}")])
+            T.append(f"Cả position {coin_of(sym)} (gồm các lần đóng trước): {b['pnl']:+.2f} USDT | phí {b['fee']:.2f}")
+    if RZ:
+        blocks.append(r_table(["Cả position", "", "Realized"], RZ, [None, None, "right"]))
     return "\n".join(T), blocks
 
 
 def status_text():
     lines = [f"Bot: {'🟢 ĐANG CHẠY' if cfg['running'] else '🔴 ĐANG DỪNG'}"]
-    rl = realized_lines()
-    if rl:
-        lines += [rl[0] + ":", "   " + rl[1], "   " + rl[2]]
+    for sym, b in ((cfg.get("realized") or {}).get("by") or {}).items():
+        lines.append(f"Realized {coin_of(sym)} ({len(b['accs'])} acc đã đóng): {dot(b['pnl'])} {b['pnl']:+.2f} USDT")
     tot = 0.0
     for c in clients:
         st = status.get(c.name) or {}
@@ -2047,15 +2117,6 @@ def status_blocks(title=None, stamp=None, photos=None):
         blocks.append(r_table(STATUS_HEAD, idle, STATUS_ALIGN))
     elif not G and not clients:
         blocks.append(r_par("Chưa cài sub account nào."))
-    rl = realized_lines()
-    by = (cfg.get("realized") or {}).get("by") or {}
-    shown = {k[0] for k in G}
-    if rl and (len(by) >= 2 or not by or any(k not in shown for k in by)):
-        rz = cfg["realized"]
-        blocks.append(r_table(["Realized PnL tổng" if len(by) >= 2 else "Realized PnL", "USDT"],
-                              [["PnL (ước tính, chưa gồm phí)" if rz.get("est") else "PnL (đã gồm phí)",
-                                B(f"{dot(rz['pnl'])}\u00a0{rz['pnl']:+.2f}")],
-                               ["Total fee", B(f"{rz['fee']:.2f}")]], [None, "right"]))
     if stamp:
         blocks.append(r_foot(stamp))
     return blocks
@@ -2183,6 +2244,9 @@ async def status_loop():
                             not (status.get(c.name) or {}).get("error") for c in clients):
                 cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}   # dot position da dong het
                 save_cfg()
+            if clients and not busy["n"] and all((status.get(c.name) or {}).get("t", 0) > time.time() - 10 and
+                                                 not (status.get(c.name) or {}).get("error") for c in clients):
+                rz_tidy()
             record_balance()
             if n % 20 == 0:    # ~1 phut: dong ho may co the bi Windows chinh lai bat cu luc nao
                 await sync_time()
@@ -4537,7 +4601,7 @@ def selftest():
         assert chart_for(k)[1]
     bal_hist.clear()
     cfg["realized"] = {"pnl": -0.5, "fee": 0.1, "n": 1}
-    assert len(realized_lines()) == 3 and "Realized PnL" in status_text() and live_kb()
+    assert len(realized_lines()) == 3 and live_kb()
     cfg["realized"] = {"pnl": 0.0, "fee": 0.0, "n": 0}
     assert CHANGELOG[0][0] == VERSION, "CHANGELOG thieu ban hien tai"
     assert status_text() and HELP_TEXT and "__VERSION__" in HTML and chan_norm() is not None

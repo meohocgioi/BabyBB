@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.37.0"
+VERSION = "1.37.2"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.37.2", ["Bỏ phần thêm của 1.37.1 (khoảng cách tới TP, báo \"Không kịp\") cho tool gọn — Trailing gỡ TP giữ như 1.37.0"]),
     ("1.37.0", ["Trailing Stop: nếu position đang có TP trên sàn, bot hỏi trước — 🧵 Gỡ TP, để trailing chạy (gỡ TP rồi đặt trailing, SL giữ nguyên) hoặc Giữ TP (chạm TP trước thì vẫn đóng ở TP)"]),
     ("1.36.4", ["/per khi Telegram đang giới hạn bot: gửi bảng chữ, không kèm biểu đồ (ảnh bị chặn lâu hơn tin chữ) — không còn mất cả tin trả lời"]),
     ("1.36.3", ["/status tự cập nhật 3s/lần trong 1 giờ sau khi mở lệnh thành công (/buy, /sell, /buyall…), sau đó 10s/lần; không còn position nào thì không tự sửa nữa (chỉ sửa khi số liệu thay đổi)",

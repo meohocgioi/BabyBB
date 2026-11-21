@@ -4,11 +4,10 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.37.1"
+VERSION = "1.37.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
-    ("1.37.1", ["Trailing + gỡ TP: tin hỏi ghi giá hiện tại còn cách TP bao nhiêu %; nếu position đã đóng (chạm TP / SL) trước khi bấm nút thì báo rõ \"Không kịp\" thay vì im lặng"]),
     ("1.37.0", ["Trailing Stop: nếu position đang có TP trên sàn, bot hỏi trước — 🧵 Gỡ TP, để trailing chạy (gỡ TP rồi đặt trailing, SL giữ nguyên) hoặc Giữ TP (chạm TP trước thì vẫn đóng ở TP)"]),
     ("1.36.4", ["/per khi Telegram đang giới hạn bot: gửi bảng chữ, không kèm biểu đồ (ảnh bị chặn lâu hơn tin chữ) — không còn mất cả tin trả lời"]),
     ("1.36.3", ["/status tự cập nhật 3s/lần trong 1 giờ sau khi mở lệnh thành công (/buy, /sell, /buyall…), sau đó 10s/lần; không còn position nào thì không tự sửa nữa (chỉ sửa khi số liệu thay đổi)",
@@ -1386,16 +1385,14 @@ async def trail_tp_ask(chat, sym, rate, size, act):
     tps = sorted({float(p["tp"]) for _, p in pos})
     tp_txt = num(tps[0]) if len(tps) == 1 else f"{num(tps[0])}–{num(tps[-1])}"
     pct = _pct_txt(tps[0], p0["avg"], p0["side"]) or ""
-    px = cur_price({"symbol": sym, "entry": p0["avg"]})
-    gap = abs(tps[0] / px - 1) * 100 if px else 0
     live["tr_pending"] = (sym, rate, size, act, time.time() + TR_TTL)
     what = f"Trailing {rate:g}%" + (f" · {size:g} USDT" if size else "") + (f" · kích hoạt {num(act)}" if act else "")
     text = (f"🧵 {what} — {side_vn(p0['side'])} {coin_of(sym)}\n"
             f"Position đang có TP {tp_txt} ({pct}) trên sàn ở {len(pos)} acc: giá chạm TP trước thì đóng luôn ở TP, trailing không kịp chạy.\n"
             "Gỡ TP để trailing chạy, hay giữ TP?")
     blocks = [r_head(f"🧵 {what} — {side_vn(p0['side'])} {coin_of(sym)}"),
-              r_par(["Position đang có ", B(f"TP {tp_txt} ({pct})"), f" trên sàn ở {len(pos)} acc — giá hiện tại {num(px)}, ",
-                     B(f"chỉ còn cách TP {gap:.2f}%"), ". Giá chạm TP trước khi bạn bấm thì đóng luôn ở TP, trailing không kịp chạy."]),
+              r_par(["Position đang có ", B(f"TP {tp_txt} ({pct})"), f" trên sàn ở {len(pos)} acc. "
+                     "Giá chạm TP trước thì đóng luôn ở TP, trailing không kịp chạy."]),
               r_foot(f"Gỡ TP: SL vẫn giữ để phòng giá dump trước khi trailing kích hoạt. Nút hết hạn sau {TR_TTL} giây.")]
     kb = {"inline_keyboard": [[{"text": "🧵 Gỡ TP, để trailing chạy", "callback_data": "trtp:1"}],
                               [{"text": "Giữ TP", "callback_data": "trtp:0"}]]}
@@ -1423,8 +1420,6 @@ async def trail_apply(chat, sym, rate, size=None, act=None, tp_choice=None):
         has = [(c, p) for c, p in acc_positions(sym) if float(p.get("tp") or 0) > 0]
         res = await asyncio.gather(*(set_tpsl_one(c, p, tp=0) for c, p in has))
         bad = [c.name for (c, _), (ok, _) in zip(has, res) if not ok]
-        if bad:
-            log(f"🧵 Trailing {sym}: gỡ TP lỗi ở {', '.join(bad)} — " + "; ".join(e[:60] for ok, e in res if not ok))
         tp_note = ("\n🧹 Đã gỡ TP " + (f"({len(has) - len(bad)}/{len(has)} acc, lỗi: {', '.join(bad)})" if bad else f"({len(has)} acc)")
                    + " — SL giữ nguyên")
         for c, _ in has:
@@ -2962,11 +2957,6 @@ async def handle_callback(cq):
         if not pend or pend[4] < time.time():
             return await answer("Hết hạn — bấm lại Trailing Stop", True)
         keep = data == "trtp:0"
-        if not acc_positions(pend[0]):         # giá da cham TP (hoac SL) truoc khi bam
-            log(f"🧵 Trailing {pend[0]}: không kịp — position đã đóng trước khi bấm nút")
-            await answer("Không kịp: position đã đóng (chạm TP / SL) trước khi bấm nút", True)
-            send(chat, f"⚠️ Không kịp đặt trailing cho {coin_of(pend[0])}: position đã đóng (chạm TP / SL) trước khi bạn bấm nút.")
-            return
         asyncio.create_task(answer("Đang đặt trailing…" if keep else "Đang gỡ TP và đặt trailing…"))
         log(f"🧵 Trailing {pend[0]}: {'giữ TP' if keep else 'gỡ TP'} (nút)")
         return await trail_apply(chat, pend[0], pend[1], pend[2], pend[3], tp_choice=not keep)

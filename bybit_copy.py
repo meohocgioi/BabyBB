@@ -4,10 +4,11 @@ Bybit Multi-Sub Copy Tool
 Nghe lenh tu 1 kenh Telegram -> mo Long + TP/SL tren nhieu sub account Bybit cung luc.
 Chay: bam start.bat (Windows). Giao dien: http://127.0.0.1:8787
 """
-VERSION = "1.36.4"
+VERSION = "1.37.0"
 
 # Change log: ban moi nhat o tren cung. Bot gui phan nay sau moi lan /update.
 CHANGELOG = [
+    ("1.37.0", ["Trailing Stop: nếu position đang có TP trên sàn, bot hỏi trước — 🧵 Gỡ TP, để trailing chạy (gỡ TP rồi đặt trailing, SL giữ nguyên) hoặc Giữ TP (chạm TP trước thì vẫn đóng ở TP)"]),
     ("1.36.4", ["/per khi Telegram đang giới hạn bot: gửi bảng chữ, không kèm biểu đồ (ảnh bị chặn lâu hơn tin chữ) — không còn mất cả tin trả lời"]),
     ("1.36.3", ["/status tự cập nhật 3s/lần trong 1 giờ sau khi mở lệnh thành công (/buy, /sell, /buyall…), sau đó 10s/lần; không còn position nào thì không tự sửa nữa (chỉ sửa khi số liệu thay đổi)",
                 "/setting: chọn nhịp 1 giờ đầu (3 / 5 / 10s) và nhịp sau 1 giờ (10 / 30 / 60s); bỏ mục Chậm lại khi không thao tác"]),
@@ -1374,8 +1375,34 @@ async def trail_ask(chat, sym, warn=None):
     track_new("ctr", chat, rm)
 
 
-async def trail_apply(chat, sym, rate, size=None, act=None):
-    """Dat Trailing Stop cho coin sym tren moi acc. size None / >= tong -> tren san; nho hon -> tool tu theo doi."""
+TR_TTL = 60
+
+
+async def trail_tp_ask(chat, sym, rate, size, act):
+    """Position dang co TP -> hoi: go TP de trailing chay, hay giu TP."""
+    pos = [(c, p) for c, p in acc_positions(sym) if float(p.get("tp") or 0) > 0]
+    p0 = pos[0][1]
+    tps = sorted({float(p["tp"]) for _, p in pos})
+    tp_txt = num(tps[0]) if len(tps) == 1 else f"{num(tps[0])}–{num(tps[-1])}"
+    pct = _pct_txt(tps[0], p0["avg"], p0["side"]) or ""
+    live["tr_pending"] = (sym, rate, size, act, time.time() + TR_TTL)
+    what = f"Trailing {rate:g}%" + (f" · {size:g} USDT" if size else "") + (f" · kích hoạt {num(act)}" if act else "")
+    text = (f"🧵 {what} — {side_vn(p0['side'])} {coin_of(sym)}\n"
+            f"Position đang có TP {tp_txt} ({pct}) trên sàn ở {len(pos)} acc: giá chạm TP trước thì đóng luôn ở TP, trailing không kịp chạy.\n"
+            "Gỡ TP để trailing chạy, hay giữ TP?")
+    blocks = [r_head(f"🧵 {what} — {side_vn(p0['side'])} {coin_of(sym)}"),
+              r_par(["Position đang có ", B(f"TP {tp_txt} ({pct})"), f" trên sàn ở {len(pos)} acc. "
+                     "Giá chạm TP trước thì đóng luôn ở TP, trailing không kịp chạy."]),
+              r_foot(f"Gỡ TP: SL vẫn giữ để phòng giá dump trước khi trailing kích hoạt. Nút hết hạn sau {TR_TTL} giây.")]
+    kb = {"inline_keyboard": [[{"text": "🧵 Gỡ TP, để trailing chạy", "callback_data": "trtp:1"}],
+                              [{"text": "Giữ TP", "callback_data": "trtp:0"}]]}
+    rm, _ = await _send_rich(chat, text, blocks, kb)
+    track_new("tr_confirm", chat, rm)
+
+
+async def trail_apply(chat, sym, rate, size=None, act=None, tp_choice=None):
+    """Dat Trailing Stop cho coin sym tren moi acc. size None / >= tong -> tren san; nho hon -> tool tu theo doi.
+    tp_choice: None = hoi neu position dang co TP; True = go TP truoc; False = giu TP."""
     info = cc_info(sym)
     if not info:
         live.pop("ctr", None)
@@ -1385,6 +1412,18 @@ async def trail_apply(chat, sym, rate, size=None, act=None):
     if size is not None and size < info["total"] * 0.995 and size < info["min"]:
         return await trail_ask(chat, sym, f"{size:g} USDT quá nhỏ: tối thiểu {info['min']:.2f} USDT (mức tối thiểu của sàn cho mỗi acc).")
     live.pop("ctr", None)
+    if tp_choice is None and any(float(p.get("tp") or 0) > 0 for _, p in acc_positions(sym)):
+        track_new("ctr", chat)                 # xoa tin hoi Custom Trailing
+        return await trail_tp_ask(chat, sym, rate, size, act)
+    tp_note = ""
+    if tp_choice:                              # go TP tren san truoc khi dat trailing
+        has = [(c, p) for c, p in acc_positions(sym) if float(p.get("tp") or 0) > 0]
+        res = await asyncio.gather(*(set_tpsl_one(c, p, tp=0) for c, p in has))
+        bad = [c.name for (c, _), (ok, _) in zip(has, res) if not ok]
+        tp_note = ("\n🧹 Đã gỡ TP " + (f"({len(has) - len(bad)}/{len(has)} acc, lỗi: {', '.join(bad)})" if bad else f"({len(has)} acc)")
+                   + " — SL giữ nguyên")
+        for c, _ in has:
+            await refresh_one(c)
     px, up = info["price"], info["side"] == "Buy"
     note = ""
     if act and (act <= px if up else act >= px):
@@ -1421,7 +1460,7 @@ async def trail_apply(chat, sym, rate, size=None, act=None):
     track_new("ctr", chat)                     # xoa tin hoi
     live.update(menu=None)
     live_refresh_now()
-    send(chat, msg + note)
+    send(chat, msg + tp_note + note)
 
 
 async def trail_remove(sym):
@@ -2911,6 +2950,16 @@ async def handle_callback(cq):
         log(f"🛒 Open Minimum Order: {side_vn(side)} {coin} {size:g} USDT, TP {tp:g}% SL {sl:g}% (nút dưới tin lỗi)")
         await execute_order(coin, size, tp, sl, "/buy" if side == "Buy" else "/sell", side=side)
         return
+    if data in ("trtp:1", "trtp:0"):           # Trailing: go TP hay giu TP
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
+        pend = live.pop("tr_pending", None)
+        track_new("tr_confirm", chat)
+        if not pend or pend[4] < time.time():
+            return await answer("Hết hạn — bấm lại Trailing Stop", True)
+        keep = data == "trtp:0"
+        asyncio.create_task(answer("Đang đặt trailing…" if keep else "Đang gỡ TP và đặt trailing…"))
+        log(f"🧵 Trailing {pend[0]}: {'giữ TP' if keep else 'gỡ TP'} (nút)")
+        return await trail_apply(chat, pend[0], pend[1], pend[2], pend[3], tp_choice=not keep)
     if data in ("ctpok", "ctpno"):             # tra loi canh bao Custom TP-SL
         chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or cfg["bot_owner_id"]
         pend = live.pop("ctp_pending", None)
@@ -3252,7 +3301,8 @@ def track_add(key, chat, *mids):
 
 def drop_inputs(chat, keep=None):
     """Bam sang nut khac -> xoa tin hoi dang treo (Custom Trailing / Custom TP-SL / Close Custom Size) va huy o nhap."""
-    for k, groups in (("ctr", ("ctr",)), ("ctp", ("ctp", "ctp_confirm")), ("cc", ("cc",)), ("wsc", ("wsc",))):
+    for k, groups in (("ctr", ("ctr",)), ("ctp", ("ctp", "ctp_confirm")), ("cc", ("cc",)), ("wsc", ("wsc",)),
+                      ("tr_pending", ("tr_confirm",))):
         if k == keep:
             continue
         live.pop(k, None)
@@ -3265,9 +3315,9 @@ def drop_inputs(chat, keep=None):
 
 def clear_prompts(chat):
     """Gui /status moi -> xoa cac tin hoi / canh bao / bang template dang treo va huy o nhap dang cho."""
-    for k in ("ctp", "cc", "ctr", "wsc", "ctp_pending", "tpl_pending"):
+    for k in ("ctp", "cc", "ctr", "wsc", "ctp_pending", "tpl_pending", "tr_pending"):
         live.pop(k, None)
-    for g in ("ctp", "ctp_confirm", "cc", "ctr", "wsc", "tpl_confirm", "tpl_info"):
+    for g in ("ctp", "ctp_confirm", "cc", "ctr", "wsc", "tpl_confirm", "tpl_info", "tr_confirm"):
         if (cfg.get("msg_track") or {}).get(g, {}).get("mids"):
             track_new(g, chat)
 
